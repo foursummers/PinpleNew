@@ -2091,11 +2091,12 @@ function isSecureRequest(req) {
   return protoList.some((proto) => proto.trim().toLowerCase() === "https");
 }
 function getSessionCookieOptions(req) {
+  const secure = isSecureRequest(req);
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
-    secure: isSecureRequest(req)
+    sameSite: "lax",
+    secure
   };
 }
 
@@ -3571,9 +3572,10 @@ var appRouter = router({
 init_db();
 import { sql as sql2 } from "drizzle-orm";
 var app = express();
+app.set("trust proxy", true);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     ts: Date.now(),
@@ -3581,7 +3583,16 @@ app.get("/api/health", (_req, res) => {
     hasDb: Boolean(process.env.DATABASE_URL),
     hasJwt: Boolean(process.env.JWT_SECRET),
     hasOAuth: Boolean(process.env.OAUTH_SERVER_URL),
-    hasResend: Boolean(process.env.RESEND_API_KEY)
+    hasResend: Boolean(process.env.RESEND_API_KEY),
+    // Surface what the request looks like to the server so we can verify
+    // trust-proxy is working and session cookies will be accepted.
+    request: {
+      protocol: req.protocol,
+      secure: req.secure,
+      xForwardedProto: req.headers["x-forwarded-proto"] ?? null,
+      hasCookieHeader: Boolean(req.headers.cookie),
+      cookieHeaderLength: (req.headers.cookie ?? "").length
+    }
   });
 });
 app.get("/api/db-ping", async (_req, res) => {

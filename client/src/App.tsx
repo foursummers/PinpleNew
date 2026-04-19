@@ -9,8 +9,19 @@ import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
 
 // ─── tRPC Client ──────────────────────────────────────────────────────────────
+// credentials: "include" ensures the session cookie is sent on every request,
+// even if the browser has unusual defaults or the frontend is later hosted on
+// a different subdomain than /api.
 const trpc = createTRPCProxyClient<any>({
-  links: [httpBatchLink({ url: "/api/trpc", transformer: superjson })],
+  links: [
+    httpBatchLink({
+      url: "/api/trpc",
+      transformer: superjson,
+      fetch(input, init) {
+        return fetch(input, { ...init, credentials: "include" });
+      },
+    }),
+  ],
 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────

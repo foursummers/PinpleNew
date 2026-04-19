@@ -20,10 +20,16 @@ import { sql } from "drizzle-orm";
 
 const app = express();
 
+// Trust Vercel's edge proxy so req.protocol / req.secure / req.ip reflect
+// the real client-facing scheme (https) rather than the internal http hop.
+// This is critical for session cookies: without it, isSecureRequest() may
+// return false and cookies with `secure: true` get rejected by the browser.
+app.set("trust proxy", true);
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-app.get("/api/health", (_req: Request, res: Response) => {
+app.get("/api/health", (req: Request, res: Response) => {
   res.json({
     ok: true,
     ts: Date.now(),
@@ -32,6 +38,15 @@ app.get("/api/health", (_req: Request, res: Response) => {
     hasJwt: Boolean(process.env.JWT_SECRET),
     hasOAuth: Boolean(process.env.OAUTH_SERVER_URL),
     hasResend: Boolean(process.env.RESEND_API_KEY),
+    // Surface what the request looks like to the server so we can verify
+    // trust-proxy is working and session cookies will be accepted.
+    request: {
+      protocol: req.protocol,
+      secure: req.secure,
+      xForwardedProto: req.headers["x-forwarded-proto"] ?? null,
+      hasCookieHeader: Boolean(req.headers.cookie),
+      cookieHeaderLength: (req.headers.cookie ?? "").length,
+    },
   });
 });
 

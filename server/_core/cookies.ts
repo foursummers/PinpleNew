@@ -24,25 +24,20 @@ function isSecureRequest(req: Request) {
 export function getSessionCookieOptions(
   req: Request
 ): Pick<CookieOptions, "domain" | "httpOnly" | "path" | "sameSite" | "secure"> {
-  // const hostname = req.hostname;
-  // const shouldSetDomain =
-  //   hostname &&
-  //   !LOCAL_HOSTS.has(hostname) &&
-  //   !isIpAddress(hostname) &&
-  //   hostname !== "127.0.0.1" &&
-  //   hostname !== "::1";
-
-  // const domain =
-  //   shouldSetDomain && !hostname.startsWith(".")
-  //     ? `.${hostname}`
-  //     : shouldSetDomain
-  //       ? hostname
-  //       : undefined;
-
+  // Why sameSite=lax instead of none:
+  //   - sameSite=none REQUIRES secure=true, and on Vercel `req.protocol` is always
+  //     "http" (TLS terminates at the edge). If the x-forwarded-proto header is
+  //     ever missing / not trusted by Express, `secure` becomes false and the
+  //     browser SILENTLY REJECTS the cookie — leaving auth broken with no
+  //     visible error. `lax` is safer: it always allows the cookie for
+  //     same-site requests (which covers 100% of our frontend → /api/trpc
+  //     traffic) and doesn't require `secure`.
+  //   - We still set `secure` on HTTPS requests as defense-in-depth.
+  const secure = isSecureRequest(req);
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
-    secure: isSecureRequest(req),
+    sameSite: "lax",
+    secure,
   };
 }
