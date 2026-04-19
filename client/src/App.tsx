@@ -4,7 +4,7 @@
  * Design: Warm editorial — organic textures, confident typography, generous space
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
 
@@ -768,41 +768,101 @@ function AlertMsg({ type, msg }: { type: "error" | "success"; msg: string }) {
 }
 
 // ─── Auth Screen ──────────────────────────────────────────────────────────────
+type AuthMode = "login" | "register" | "forgot" | "reset";
+
 function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("");
+  // 如果 URL 里带有 ?reset_token=xxx，进入 reset 模式
+  const initialToken = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("reset_token") || "";
+  }, []);
+
+  const [mode, setMode] = useState<AuthMode>(initialToken ? "reset" : "login");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
   const [name, setName] = useState("");
+  const [resetToken, setResetToken] = useState(initialToken);
+  const [resetUrlFallback, setResetUrlFallback] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const handleGoogleLogin = () => {
-    const appId = (window as any).__VITE_APP_ID__ || "";
-    const state = btoa(window.location.origin + "/api/oauth/callback");
-    window.location.href = `/api/oauth/callback?login=1`;
-    // Redirect to OAuth
-    window.location.href = `${window.location.origin}/api/oauth/start`;
+  const switchMode = (next: AuthMode) => {
+    setMode(next);
+    setError("");
+    setSuccess("");
+    setResetUrlFallback(null);
   };
 
   const submit = async () => {
     setError(""); setSuccess("");
-    if (!email || !password) { setError("请填写邮箱和密码"); return; }
-    if (mode === "register" && !name) { setError("请填写昵称"); return; }
-    setLoading(true);
     try {
+      setLoading(true);
       if (mode === "register") {
-        await (trpc as any).auth.register.mutate({ email, password, name });
+        if (!identifier || !password) { setError("请填写邮箱和密码"); return; }
+        if (!name) { setError("请填写昵称"); return; }
+        if (password.length < 8) { setError("密码至少 8 位"); return; }
+        await (trpc as any).auth.register.mutate({ email: identifier, password, name });
         setSuccess("注册成功，正在进入…");
-      } else {
-        await (trpc as any).auth.loginWithEmail.mutate({ email, password });
+        const user = await (trpc as any).auth.me.query();
+        if (user) onAuth(user);
+      } else if (mode === "login") {
+        if (!identifier || !password) { setError("请填写账号和密码"); return; }
+        await (trpc as any).auth.loginWithIdentifier.mutate({ identifier: identifier.trim(), password });
+        const user = await (trpc as any).auth.me.query();
+        if (user) onAuth(user);
+      } else if (mode === "forgot") {
+        if (!identifier) { setError("请输入你的注册邮箱"); return; }
+        const res = await (trpc as any).auth.requestPasswordReset.mutate({ email: identifier.trim() });
+        setSuccess("如果该邮箱已注册，我们已向你发送重置链接，请查收邮箱（30 分钟内有效）。");
+        if (res?.resetUrl) {
+          // 未配置邮件服务时的过渡方案：前端直接显示重置链接
+          setResetUrlFallback(res.resetUrl);
+        }
+      } else if (mode === "reset") {
+        if (!resetToken) { setError("重置链接无效，请重新申请"); return; }
+        if (password.length < 8) { setError("新密码至少 8 位"); return; }
+        if (password !== password2) { setError("两次输入的密码不一致"); return; }
+        await (trpc as any).auth.resetPassword.mutate({ token: resetToken, newPassword: password });
+        setSuccess("密码已重置，正在登录…");
+        // 清掉 URL 上的 token，避免刷新后再次进入 reset 模式
+        if (typeof window !== "undefined") {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("reset_token");
+          window.history.replaceState({}, "", url.toString());
+        }
+        const user = await (trpc as any).auth.me.query();
+        if (user) onAuth(user);
       }
-      const user = await (trpc as any).auth.me.query();
-      if (user) onAuth(user);
     } catch (e: any) {
       setError(e?.message || "操作失败，请重试");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
+  };
+
+  const titleMap: Record<AuthMode, string> = {
+    login: "欢迎回来",
+    register: "加入拼朋友",
+    forgot: "找回密码",
+    reset: "设置新密码",
+  };
+  const subtitleMap: Record<AuthMode, string> = {
+    login: "信任圈社交 · 技能共享市场 · 用你的邻居守护你的孩子。",
+    register: "创建你的信任身份，进入真实社区。",
+    forgot: "输入注册邮箱，我们将向你发送带有重置链接的邮件。",
+    reset: "为你的账号设置一个新的登录密码。",
+  };
+  const primaryLabel: Record<AuthMode, React.ReactNode> = {
+    login: <>INITIALIZE UPLINK <span aria-hidden>→</span></>,
+    register: <>CREATE IDENTITY <span aria-hidden>→</span></>,
+    forgot: <>SEND RESET LINK <span aria-hidden>→</span></>,
+    reset: <>UPDATE PASSCODE <span aria-hidden>→</span></>,
+  };
+
+  const onKeyEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") submit();
   };
 
   return (
@@ -820,51 +880,43 @@ function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
         <div className="auth-logo">
           <div className="auth-system-badge">PINPLE.IDENTITY</div>
           <div className="auth-logo-mark" style={{ marginTop: 14 }}>pin<span>ple</span></div>
-          <h1 className="auth-title">
-            {mode === "login" ? "欢迎回来" : "加入拼朋友"}
-          </h1>
-          <p className="auth-subtitle">
-            {mode === "login"
-              ? "信任圈社交 · 技能共享市场 · 用你的邻居守护你的孩子。"
-              : "创建你的信任身份，进入真实社区。"}
-          </p>
+          <h1 className="auth-title">{titleMap[mode]}</h1>
+          <p className="auth-subtitle">{subtitleMap[mode]}</p>
         </div>
 
-        {/* 登录 / 注册 切换 */}
-        <div className="auth-tabs">
-          <button
-            className={`auth-tab ${mode === "login" ? "active" : ""}`}
-            onClick={() => { setMode("login"); setError(""); }}
-          >
-            登录
-          </button>
-          <button
-            className={`auth-tab ${mode === "register" ? "active" : ""}`}
-            onClick={() => { setMode("register"); setError(""); }}
-          >
-            注册账号
-          </button>
-        </div>
-
-        {/* SSO 登录 */}
-        <div className="auth-sso-grid">
-          <a href="/api/oauth/callback?provider=google" className="auth-btn-sso">
-            <GoogleIcon /> Google
-          </a>
-          <button
-            type="button"
-            className="auth-btn-sso"
-            onClick={() => setError("微信登录即将开放，敬请期待")}
-          >
-            <WeChatIcon /> 微信
-          </button>
-        </div>
-
-        <div className="divider">STANDARD PROTOCOL</div>
+        {/* 登录 / 注册 切换（在找回/重置模式下隐藏） */}
+        {(mode === "login" || mode === "register") && (
+          <div className="auth-tabs">
+            <button
+              className={`auth-tab ${mode === "login" ? "active" : ""}`}
+              onClick={() => switchMode("login")}
+            >
+              登录
+            </button>
+            <button
+              className={`auth-tab ${mode === "register" ? "active" : ""}`}
+              onClick={() => switchMode("register")}
+            >
+              注册账号
+            </button>
+          </div>
+        )}
 
         {error && <AlertMsg type="error" msg={error} />}
         {success && <AlertMsg type="success" msg={success} />}
 
+        {resetUrlFallback && (
+          <div className="alert alert-success" style={{ wordBreak: "break-all" }}>
+            邮件服务暂未配置，请直接使用此链接重置密码：
+            <div style={{ marginTop: 8 }}>
+              <a href={resetUrlFallback} style={{ color: "inherit", textDecoration: "underline" }}>
+                {resetUrlFallback}
+              </a>
+            </div>
+          </div>
+        )}
+
+        {/* 注册专属：昵称 */}
         {mode === "register" && (
           <div className="field">
             <label>NICKNAME · 昵称</label>
@@ -872,38 +924,124 @@ function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
               placeholder="例如：苏瑾"
               value={name}
               onChange={e => setName(e.target.value)}
+              onKeyDown={onKeyEnter}
             />
           </div>
         )}
-        <div className="field">
-          <label>IDENTIFIER · 邮箱</label>
-          <input
-            type="email"
-            placeholder="you@domain.net"
-            autoComplete="email"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>PASSCODE · 密码{mode === "register" ? " // ≥ 8" : ""}</label>
-          <input
-            type="password"
-            placeholder="••••••••••••"
-            autoComplete={mode === "login" ? "current-password" : "new-password"}
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && submit()}
-          />
-        </div>
+
+        {/* 账号输入：login/register/forgot 都有 */}
+        {(mode === "login" || mode === "register" || mode === "forgot") && (
+          <div className="field">
+            <label>
+              {mode === "login" ? "IDENTIFIER · 邮箱 / 用户 ID" : "IDENTIFIER · 邮箱"}
+            </label>
+            <input
+              type={mode === "login" ? "text" : "email"}
+              placeholder={mode === "login" ? "邮箱地址 或 数字 ID" : "you@domain.net"}
+              autoComplete={mode === "login" ? "username" : "email"}
+              value={identifier}
+              onChange={e => setIdentifier(e.target.value)}
+              onKeyDown={onKeyEnter}
+            />
+          </div>
+        )}
+
+        {/* 密码输入：login/register/reset 需要 */}
+        {(mode === "login" || mode === "register" || mode === "reset") && (
+          <div className="field">
+            <label>
+              PASSCODE · 密码
+              {(mode === "register" || mode === "reset") ? " // ≥ 8" : ""}
+            </label>
+            <input
+              type="password"
+              placeholder="••••••••••••"
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={onKeyEnter}
+            />
+          </div>
+        )}
+
+        {/* 重置密码时再加一个"确认密码" */}
+        {mode === "reset" && (
+          <div className="field">
+            <label>CONFIRM · 再次输入</label>
+            <input
+              type="password"
+              placeholder="••••••••••••"
+              autoComplete="new-password"
+              value={password2}
+              onChange={e => setPassword2(e.target.value)}
+              onKeyDown={onKeyEnter}
+            />
+          </div>
+        )}
+
+        {/* 登录模式下显示"忘记密码" */}
+        {mode === "login" && (
+          <div style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            fontSize: 12,
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}>
+            <button
+              type="button"
+              onClick={() => switchMode("forgot")}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "rgba(255,255,255,0.55)",
+                cursor: "pointer",
+                padding: "4px 2px",
+                fontFamily: "inherit",
+                fontSize: "inherit",
+                letterSpacing: "inherit",
+                textTransform: "inherit",
+              }}
+            >
+              忘记密码？
+            </button>
+          </div>
+        )}
 
         <button className="btn-primary" onClick={submit} disabled={loading}>
-          {loading
-            ? "处理中…"
-            : mode === "login"
-              ? <>INITIALIZE UPLINK <span aria-hidden>→</span></>
-              : <>CREATE IDENTITY <span aria-hidden>→</span></>}
+          {loading ? "处理中…" : primaryLabel[mode]}
         </button>
+
+        {/* 找回/重置模式下提供返回登录入口 */}
+        {(mode === "forgot" || mode === "reset") && (
+          <div style={{
+            display: "flex",
+            justifyContent: "center",
+            fontSize: 12,
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}>
+            <button
+              type="button"
+              onClick={() => switchMode("login")}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "rgba(255,255,255,0.55)",
+                cursor: "pointer",
+                padding: "4px 2px",
+                fontFamily: "inherit",
+                fontSize: "inherit",
+                letterSpacing: "inherit",
+                textTransform: "inherit",
+              }}
+            >
+              ← 返回登录
+            </button>
+          </div>
+        )}
 
         <div className="auth-footer">
           <span>SECURE · E2E · TRUST-RING</span>
@@ -911,26 +1049,6 @@ function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
         </div>
       </div>
     </div>
-  );
-}
-
-// 内联 SSO 图标（避免引入额外依赖）
-function GoogleIcon() {
-  return (
-    <svg viewBox="0 0 48 48" aria-hidden>
-      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.4-.4-3.5z" />
-      <path fill="#FF3D00" d="M6.3 14.1l6.6 4.8C14.6 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.1z" />
-      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.1 35.2 26.7 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.7 16.2 44 24 44z" />
-      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.5l6.2 5.2C41.5 35.8 44 30.4 44 24c0-1.2-.1-2.4-.4-3.5z" />
-    </svg>
-  );
-}
-function WeChatIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden fill="currentColor">
-      <path d="M9.5 3C4.8 3 1 6.1 1 10c0 2.1 1.1 4 2.9 5.3L3 18l3-1.6c.9.2 1.8.3 2.7.3h.6c-.2-.6-.3-1.2-.3-1.9 0-3.6 3.4-6.5 7.6-6.5h.5C16.4 5.3 13.3 3 9.5 3zM7 8.5a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2z" />
-      <path d="M23 14.8c0-3-2.9-5.4-6.5-5.4S10 11.8 10 14.8c0 3 2.9 5.4 6.5 5.4.8 0 1.5-.1 2.2-.3l2.3 1.2-.7-2.1c1.7-1 2.7-2.5 2.7-4.2zm-8.5-.7a.8.8 0 110-1.6.8.8 0 010 1.6zm4 0a.8.8 0 110-1.6.8.8 0 010 1.6z" />
-    </svg>
   );
 }
 

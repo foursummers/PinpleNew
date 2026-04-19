@@ -47,6 +47,9 @@ import {
   InsertUserReport,
   userBlocks,
   InsertUserBlock,
+  passwordResetTokens,
+  InsertPasswordResetToken,
+  PasswordResetToken,
 } from "../drizzle/schema";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -177,6 +180,51 @@ export async function updateUserCreditScore(userId: number, delta: number) {
 export async function getUserCreditScore(userId: number): Promise<number> {
   const user = await getUserById(userId);
   return user?.creditScore ?? 100;
+}
+
+// ─── Password Reset ──────────────────────────────────────────────────────────
+export async function updateUserPassword(userId: number, passwordHash: string): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
+}
+
+export async function createPasswordResetToken(
+  data: { userId: number; token: string; expiresAt: Date }
+): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const result = await db.insert(passwordResetTokens).values({
+    userId: data.userId,
+    token: data.token,
+    expiresAt: data.expiresAt,
+  });
+  return (result[0] as any).insertId;
+}
+
+export async function getValidPasswordResetToken(token: string): Promise<PasswordResetToken | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const now = new Date();
+  const rows = await db
+    .select()
+    .from(passwordResetTokens)
+    .where(eq(passwordResetTokens.token, token))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  if (row.usedAt) return undefined;
+  if (row.expiresAt.getTime() < now.getTime()) return undefined;
+  return row;
+}
+
+export async function markPasswordResetTokenUsed(id: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(passwordResetTokens)
+    .set({ usedAt: new Date() })
+    .where(eq(passwordResetTokens.id, id));
 }
 
 // ─── Families ─────────────────────────────────────────────────────────────────

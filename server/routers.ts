@@ -1,11 +1,16 @@
 import { TRPCError } from "@trpc/server";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
+import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { sdk } from "./_core/sdk";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import {
+  sendEmail,
+  hasEmailProvider,
+  buildPasswordResetEmail,
+} from "./_core/email";
 import {
   addFamilyMember,
   createChild,
@@ -88,6 +93,10 @@ import {
     createEmailUser,
     updateUserCreditScore,
     getUserCreditScore,
+    updateUserPassword,
+    createPasswordResetToken,
+    getValidPasswordResetToken,
+    markPasswordResetTokenUsed,
     createRecommendation,
     getRecommendationChain,
     createSkill,
@@ -138,6 +147,26 @@ function calcAge(birthDate: Date): { years: number; months: number; days: number
   }
   const totalMonths = years * 12 + months;
   return { years, months, days, totalMonths };
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(input);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function getAppOrigin(req: { headers: { host?: string; "x-forwarded-host"?: string | string[]; "x-forwarded-proto"?: string | string[] } }): string {
+  const forwardedHost = Array.isArray(req.headers["x-forwarded-host"])
+    ? req.headers["x-forwarded-host"][0]
+    : req.headers["x-forwarded-host"];
+  const host = forwardedHost || req.headers.host || "localhost";
+  const forwardedProto = Array.isArray(req.headers["x-forwarded-proto"])
+    ? req.headers["x-forwarded-proto"][0]
+    : req.headers["x-forwarded-proto"];
+  const proto = forwardedProto || (host.includes("localhost") ? "http" : "https");
+  return `${proto}://${host}`;
 }
 
 async function assertFamilyAdmin(familyId: number, userId: number) {
@@ -209,12 +238,7 @@ export const appRouter = router({
         const existing = await getUserByEmail(input.email);
         if (existing) throw new TRPCError({ code: "CONFLICT", message: "该邮箱已注册" });
 
-        const encoder = new TextEncoder();
-        const data = encoder.encode(input.password);
-        const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const passwordHash = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-
+        const passwordHash = await sha256Hex(input.password);
         const openId = `email_${nanoid(16)}`;
         const userId = await createEmailUser({
           email: input.email,
@@ -233,25 +257,32 @@ export const appRouter = router({
         return { userId, success: true };
       }),
 
-    loginWithEmail: publicProcedure
+    // 通用登录：identifier 可以是邮箱（含 @）或数字用户 ID
+    loginWithIdentifier: publicProcedure
       .input(z.object({
-        email: z.string().email(),
+        identifier: z.string().min(1).max(320),
         password: z.string(),
       }))
       .mutation(async ({ ctx, input }) => {
-        const user = await getUserByEmail(input.email);
+        const identifier = input.identifier.trim();
+        let user: Awaited<ReturnType<typeof getUserByEmail>> | undefined;
+        if (identifier.includes("@")) {
+          user = await getUserByEmail(identifier);
+        } else if (/^\d+$/.test(identifier)) {
+          const { getUserById } = await import("./db");
+          user = await getUserById(Number(identifier));
+        } else {
+          // 兜底：按 openId 查找（便于内部迁移账号登录）
+          const { getUserByOpenId } = await import("./db");
+          user = await getUserByOpenId(identifier);
+        }
         if (!user || !user.passwordHash) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "邮箱或密码错误" });
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "账号或密码错误" });
         }
 
-        const encoder = new TextEncoder();
-        const data = encoder.encode(input.password);
-        const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const passwordHash = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-
+        const passwordHash = await sha256Hex(input.password);
         if (passwordHash !== user.passwordHash) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "邮箱或密码错误" });
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "账号或密码错误" });
         }
 
         const creditScore = await getUserCreditScore(user.id);
@@ -267,6 +298,101 @@ export const appRouter = router({
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
 
         return { userId: user.id, success: true };
+      }),
+
+    // 兼容旧前端：保留 loginWithEmail 作为 loginWithIdentifier 的薄包装
+    loginWithEmail: publicProcedure
+      .input(z.object({
+        email: z.string().email(),
+        password: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const user = await getUserByEmail(input.email);
+        if (!user || !user.passwordHash) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "邮箱或密码错误" });
+        }
+        const passwordHash = await sha256Hex(input.password);
+        if (passwordHash !== user.passwordHash) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "邮箱或密码错误" });
+        }
+        const creditScore = await getUserCreditScore(user.id);
+        if (creditScore < 10) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "您的信用分过低，无法登录" });
+        }
+        const sessionToken = await sdk.createSessionToken(user.openId, {
+          name: user.name || "",
+          expiresInMs: ONE_YEAR_MS,
+        });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        return { userId: user.id, success: true };
+      }),
+
+    // 请求通过邮箱找回密码。始终返回 { sent: true } 以避免账号枚举。
+    // 若未配置 RESEND_API_KEY，会在返回值里附带 resetUrl（仅开发/过渡用途）。
+    requestPasswordReset: publicProcedure
+      .input(z.object({ email: z.string().email() }))
+      .mutation(async ({ ctx, input }) => {
+        const EXPIRES_MINUTES = 30;
+        const user = await getUserByEmail(input.email);
+        // 不论用户是否存在，都"假装"已发送，防止枚举
+        if (!user) {
+          return { sent: true as const, emailed: false, resetUrl: null as string | null };
+        }
+
+        const token = nanoid(48);
+        const expiresAt = new Date(Date.now() + EXPIRES_MINUTES * 60 * 1000);
+        try {
+          await createPasswordResetToken({ userId: user.id, token, expiresAt });
+        } catch (err) {
+          console.error("[auth] 创建重置 token 失败：", err);
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "服务异常，请稍后重试" });
+        }
+
+        const origin = getAppOrigin(ctx.req);
+        const resetUrl = `${origin}/?reset_token=${encodeURIComponent(token)}`;
+        const { subject, html, text } = buildPasswordResetEmail({
+          name: user.name || "",
+          resetUrl,
+          expiresMinutes: EXPIRES_MINUTES,
+        });
+
+        const result = await sendEmail({ to: input.email, subject, html, text });
+        // 已配置邮件服务：仅返回 sent，永不回显链接
+        if (hasEmailProvider()) {
+          return { sent: true as const, emailed: result.sent, resetUrl: null as string | null };
+        }
+        // 未配置邮件服务：把 resetUrl 回传，前端可直接展示给用户（过渡方案）
+        return { sent: true as const, emailed: false, resetUrl };
+      }),
+
+    // 用 token 重置密码
+    resetPassword: publicProcedure
+      .input(z.object({
+        token: z.string().min(10).max(200),
+        newPassword: z.string().min(8).max(100),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const record = await getValidPasswordResetToken(input.token);
+        if (!record) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "链接已失效，请重新申请找回密码" });
+        }
+        const passwordHash = await sha256Hex(input.newPassword);
+        await updateUserPassword(record.userId, passwordHash);
+        await markPasswordResetTokenUsed(record.id);
+
+        // 重置成功后直接签发会话，免去再次登录
+        const { getUserById } = await import("./db");
+        const user = await getUserById(record.userId);
+        if (user) {
+          const sessionToken = await sdk.createSessionToken(user.openId, {
+            name: user.name || "",
+            expiresInMs: ONE_YEAR_MS,
+          });
+          const cookieOptions = getSessionCookieOptions(ctx.req);
+          ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        }
+        return { success: true as const };
       }),
   }),
 
