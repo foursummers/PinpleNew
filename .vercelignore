@@ -1,0 +1,11 @@
+node_modules
+.git
+.env
+.env.local
+dist
+.manus
+.manus-logs
+**/*.test.ts
+PRODUCT.md
+INTEGRATION.md
+README.md
