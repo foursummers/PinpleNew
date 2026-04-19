@@ -1,5 +1,9 @@
 export const ENV = {
-  appId: process.env.VITE_APP_ID ?? "",
+  // appId is a Manus-OAuth leftover that we still embed in session JWTs.
+  // It MUST be a non-empty string, otherwise verifySession() rejects the
+  // cookie and every protected route returns 401. Default to the project
+  // slug so email/password deployments don't need to set VITE_APP_ID.
+  appId: process.env.VITE_APP_ID || "pinple",
   cookieSecret: process.env.JWT_SECRET ?? "",
   databaseUrl: process.env.DATABASE_URL ?? "",
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",

@@ -1840,7 +1840,11 @@ import { SignJWT, jwtVerify } from "jose";
 
 // server/_core/env.ts
 var ENV = {
-  appId: process.env.VITE_APP_ID ?? "",
+  // appId is a Manus-OAuth leftover that we still embed in session JWTs.
+  // It MUST be a non-empty string, otherwise verifySession() rejects the
+  // cookie and every protected route returns 401. Default to the project
+  // slug so email/password deployments don't need to set VITE_APP_ID.
+  appId: process.env.VITE_APP_ID || "pinple",
   cookieSecret: process.env.JWT_SECRET ?? "",
   databaseUrl: process.env.DATABASE_URL ?? "",
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
@@ -1993,14 +1997,14 @@ var SDKServer = class {
         algorithms: ["HS256"]
       });
       const { openId, appId, name } = payload;
-      if (!isNonEmptyString(openId) || !isNonEmptyString(appId) || !isNonEmptyString(name)) {
-        console.warn("[Auth] Session payload missing required fields");
+      if (!isNonEmptyString(openId)) {
+        console.warn("[Auth] Session payload missing openId");
         return null;
       }
       return {
         openId,
-        appId,
-        name
+        appId: isNonEmptyString(appId) ? appId : "pinple",
+        name: isNonEmptyString(name) ? name : ""
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
