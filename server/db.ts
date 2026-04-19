@@ -54,11 +54,13 @@ import {
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _dbCreatedAt = 0;
+let _schemaReadyPromise: Promise<void> | null = null;
 const DB_MAX_AGE_MS = 5 * 60 * 1000; // Recreate connection every 5 minutes to prevent stale connections
 
 export function resetDb() {
   _db = null;
   _dbCreatedAt = 0;
+  _schemaReadyPromise = null;
 }
 
 export async function getDb() {
@@ -66,6 +68,7 @@ export async function getDb() {
   // Reset stale connection
   if (_db && now - _dbCreatedAt > DB_MAX_AGE_MS) {
     _db = null;
+    _schemaReadyPromise = null;
   }
   if (!_db && process.env.DATABASE_URL) {
     try {
@@ -76,7 +79,178 @@ export async function getDb() {
       _db = null;
     }
   }
+  // Self-healing schema bootstrap — guarded by a single shared promise so parallel
+  // callers wait for the same work and never see a partially-migrated schema.
+  if (_db && !_schemaReadyPromise) {
+    const dbRef = _db;
+    _schemaReadyPromise = ensureSchema(dbRef).catch((err) => {
+      console.warn("[Database] ensureSchema failed (continuing):", err);
+    });
+  }
+  if (_schemaReadyPromise) {
+    await _schemaReadyPromise;
+  }
   return _db;
+}
+
+/**
+ * Idempotent schema bootstrap. Runs every cold start to ensure v4 fields & tables exist.
+ * Each DDL is wrapped in try/catch — if a column already exists or the syntax isn't
+ * supported on the server, we log and move on.
+ */
+async function ensureSchema(db: NonNullable<typeof _db>) {
+  const statements: string[] = [
+    // ── users v4 fields ──────────────────────────────────────────────
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `bio` varchar(500)",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `location` varchar(255)",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `skillTags` text",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `creditScore` int DEFAULT 100",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `passwordHash` varchar(255)",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `wechatOpenId` varchar(64)",
+    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `reportedCount` int DEFAULT 0",
+    // ── password reset tokens ────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`password_reset_tokens\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`userId\` int NOT NULL,
+      \`token\` varchar(128) NOT NULL,
+      \`expiresAt\` timestamp NOT NULL,
+      \`usedAt\` timestamp NULL,
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      CONSTRAINT \`password_reset_tokens_id\` PRIMARY KEY(\`id\`),
+      CONSTRAINT \`password_reset_tokens_token_unique\` UNIQUE(\`token\`)
+    )`,
+    // ── recommendations ──────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`recommendations\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`userId\` int NOT NULL,
+      \`recommenderId\` int NOT NULL,
+      \`targetUserId\` int NOT NULL,
+      \`context\` varchar(255),
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`recommendations_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── skills ───────────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`skills\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`userId\` int NOT NULL,
+      \`name\` varchar(255) NOT NULL,
+      \`category\` varchar(100),
+      \`description\` text,
+      \`images\` text,
+      \`priceMin\` decimal(10,2),
+      \`priceMax\` decimal(10,2),
+      \`location\` varchar(255),
+      \`serviceRadius\` int,
+      \`availableTimes\` text,
+      \`contactMethod\` varchar(50),
+      \`status\` enum('active','inactive') DEFAULT 'active',
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`skills_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── help_requests ────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`help_requests\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`userId\` int NOT NULL,
+      \`title\` varchar(255) NOT NULL,
+      \`description\` text,
+      \`skillTags\` text,
+      \`budgetMin\` decimal(10,2),
+      \`budgetMax\` decimal(10,2),
+      \`location\` varchar(255),
+      \`urgency\` enum('low','medium','high') DEFAULT 'medium',
+      \`deadline\` timestamp NULL,
+      \`status\` enum('open','matched','closed') DEFAULT 'open',
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`help_requests_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── skill_matches ────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`skill_matches\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`requestId\` int NOT NULL,
+      \`skillId\` int NOT NULL,
+      \`providerId\` int NOT NULL,
+      \`status\` enum('pending','accepted','rejected','completed') DEFAULT 'pending',
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`skill_matches_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── reviews ──────────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`reviews\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`fromUserId\` int NOT NULL,
+      \`toUserId\` int NOT NULL,
+      \`matchId\` int NOT NULL,
+      \`rating\` int NOT NULL,
+      \`comment\` text,
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`reviews_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── user_reports ─────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`user_reports\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`reporterId\` int NOT NULL,
+      \`reportedUserId\` int NOT NULL,
+      \`reason\` enum('inappropriate','fraud','harassment','other') DEFAULT 'other',
+      \`description\` text,
+      \`evidence\` text,
+      \`status\` enum('pending','approved','rejected') DEFAULT 'pending',
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT \`user_reports_id\` PRIMARY KEY(\`id\`)
+    )`,
+    // ── user_blocks ──────────────────────────────────────────────────
+    `CREATE TABLE IF NOT EXISTS \`user_blocks\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`userId\` int NOT NULL,
+      \`blockedUserId\` int NOT NULL,
+      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+      CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
+    )`,
+  ];
+
+  for (const stmt of statements) {
+    try {
+      await db.execute(sql.raw(stmt));
+    } catch (err: any) {
+      const msg = String(err?.message || err?.sqlMessage || err);
+      // Silently ignore: column already exists, table already exists, or syntax not supported (older MySQL)
+      if (
+        /Duplicate column|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR/i.test(msg) ||
+        err?.code === "ER_DUP_FIELDNAME" ||
+        err?.code === "ER_TABLE_EXISTS_ERROR"
+      ) {
+        continue;
+      }
+      // Older MySQL without ADD COLUMN IF NOT EXISTS support: try fallback per-column check
+      if (/You have an error in your SQL syntax/i.test(msg) && stmt.startsWith("ALTER TABLE")) {
+        const match = stmt.match(/ADD COLUMN IF NOT EXISTS `([^`]+)` (.+)$/);
+        if (match) {
+          const [, col, def] = match;
+          try {
+            const existsRows: any = await db.execute(
+              sql.raw(
+                `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = '${col}'`,
+              ),
+            );
+            const first = Array.isArray(existsRows) ? existsRows[0] : existsRows;
+            const row = Array.isArray(first) ? first[0] : first;
+            if (Number(row?.c ?? 0) === 0) {
+              await db.execute(sql.raw(`ALTER TABLE \`users\` ADD COLUMN \`${col}\` ${def}`));
+            }
+            continue;
+          } catch (innerErr) {
+            console.warn(`[Database] ensureSchema fallback failed for ${col}:`, innerErr);
+            continue;
+          }
+        }
+      }
+      console.warn(`[Database] ensureSchema stmt failed (continuing):`, msg);
+    }
+  }
 }
 
 // Wrap any DB operation with auto-retry on connection reset
