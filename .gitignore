@@ -8,8 +8,9 @@ dist/
 build/
 *.dist
 
-# Generated serverless bundle (built from server/vercel-handler.ts at deploy time)
-api/index.js
+# NOTE: api/index.js IS committed (not ignored) — Vercel's function scanner
+# needs it visible at clone time to register the serverless route.
+# It's regenerated on every build via `npm run build:api`.
 api/index.js.map
 
 # Environment variables
