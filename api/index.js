@@ -2491,7 +2491,9 @@ var appRouter = router({
       });
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      return { userId, success: true };
+      const { getUserById: getUserById2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+      const user = await getUserById2(userId);
+      return { userId, success: true, user };
     }),
     // 通用登录：identifier 可以是邮箱（含 @）或数字用户 ID
     loginWithIdentifier: publicProcedure.input(z2.object({
@@ -2526,7 +2528,7 @@ var appRouter = router({
       });
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      return { userId: user.id, success: true };
+      return { userId: user.id, success: true, user };
     }),
     // 兼容旧前端：保留 loginWithEmail 作为 loginWithIdentifier 的薄包装
     loginWithEmail: publicProcedure.input(z2.object({

@@ -639,6 +639,133 @@ body { background: var(--c-bg); color: var(--c-ink); font-family: var(--ff-body)
   .auth-tech-label.tr, .auth-tech-label.br { display: none; }
 }
 
+/* ── AURA Boot Screen (shares aura bg with auth screen) ── */
+.aura-boot {
+  position: relative;
+  min-height: 100vh;
+  background: #030407;
+  color: #fff;
+  font-family: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.aura-boot::before {
+  content: '';
+  position: absolute;
+  inset: -10%;
+  background:
+    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
+    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
+    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
+    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
+  filter: blur(20px);
+  animation: auraSweep 14s ease-in-out infinite alternate;
+  pointer-events: none;
+  z-index: 0;
+}
+.aura-boot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-size: 3px 3px;
+  opacity: 0.55;
+  mix-blend-mode: screen;
+  pointer-events: none;
+  z-index: 1;
+}
+.aura-boot-inner {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  text-align: center;
+}
+.aura-boot-mark {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 42px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+.aura-boot-mark span {
+  color: rgba(255,255,255,0.55);
+  font-weight: 300;
+}
+.aura-boot-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: rgba(255,255,255,0.75);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  padding: 5px 12px;
+  border-radius: 999px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.aura-boot-status {
+  font-size: 14px;
+  color: rgba(255,255,255,0.55);
+  letter-spacing: 0.02em;
+  min-height: 22px;
+}
+.aura-boot-dots {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.aura-boot-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.6);
+  animation: auraBootDot 1.2s ease-in-out infinite;
+}
+.aura-boot-dots span:nth-child(2) { animation-delay: 0.15s; }
+.aura-boot-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes auraBootDot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30%           { opacity: 1;    transform: translateY(-2px); }
+}
+.aura-boot-bar {
+  width: 220px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+  position: relative;
+}
+.aura-boot-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(74,136,255,0.9), transparent);
+  animation: auraBootBar 1.6s ease-in-out infinite;
+}
+@keyframes auraBootBar {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.aura-boot-footer {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: rgba(255,255,255,0.3);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  z-index: 2;
+}
+
 /* ── Tasks ── */
 .task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .task-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); padding: 16px; position: relative; overflow: hidden; }
@@ -803,15 +930,21 @@ function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
         if (!identifier || !password) { setError("请填写邮箱和密码"); return; }
         if (!name) { setError("请填写昵称"); return; }
         if (password.length < 8) { setError("密码至少 8 位"); return; }
-        await (trpc as any).auth.register.mutate({ email: identifier, password, name });
+        setSuccess("正在创建账号…首次启动可能需要 10–20 秒");
+        const res = await (trpc as any).auth.register.mutate({ email: identifier, password, name });
         setSuccess("注册成功，正在进入…");
-        const user = await (trpc as any).auth.me.query();
+        // Prefer the user object returned by register to avoid a second DB roundtrip
+        // (which on a cold start can hit a fresh lambda and trigger schema bootstrap again).
+        const user = res?.user ?? (await (trpc as any).auth.me.query().catch(() => null));
         if (user) onAuth(user);
+        else setError("注册成功但获取用户信息失败，请刷新重试");
       } else if (mode === "login") {
         if (!identifier || !password) { setError("请填写账号和密码"); return; }
-        await (trpc as any).auth.loginWithIdentifier.mutate({ identifier: identifier.trim(), password });
-        const user = await (trpc as any).auth.me.query();
+        const res = await (trpc as any).auth.loginWithIdentifier.mutate({ identifier: identifier.trim(), password });
+        setSuccess("登录成功，正在进入…");
+        const user = res?.user ?? (await (trpc as any).auth.me.query().catch(() => null));
         if (user) onAuth(user);
+        else setError("登录成功但获取用户信息失败，请刷新重试");
       } else if (mode === "forgot") {
         if (!identifier) { setError("请输入你的注册邮箱"); return; }
         const res = await (trpc as any).auth.requestPasswordReset.mutate({ email: identifier.trim() });
@@ -1922,11 +2055,20 @@ export default function App() {
   const [page, setPage] = useState("home");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
+  const [bootElapsed, setBootElapsed] = useState(0);
 
   // Auth check
   useEffect(() => {
     (trpc as any).auth.me.query().then((u: User | null) => setUser(u)).catch(() => setUser(null));
   }, []);
+
+  // Track elapsed time during boot so we can surface a friendlier message on slow cold starts.
+  useEffect(() => {
+    if (user !== undefined) return;
+    const started = Date.now();
+    const timer = setInterval(() => setBootElapsed(Date.now() - started), 500);
+    return () => clearInterval(timer);
+  }, [user]);
 
   // Load family data
   const loadFamilyData = useCallback(async (fam: Family) => {
@@ -1949,13 +2091,32 @@ export default function App() {
     setUser(null); setFamily(null);
   };
 
-  // Loading state
+  // Loading state — shares the AURA look of the auth screen so the app feels cohesive.
   if (user === undefined) {
+    const secs = Math.floor(bootElapsed / 1000);
+    const statusText =
+      secs < 4
+        ? "正在连接服务"
+        : secs < 10
+        ? "正在同步会话状态"
+        : secs < 20
+        ? "首次启动中，正在准备数据库"
+        : "仍在启动中，感谢你的耐心";
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", flexDirection: "column", gap: 12 }}>
+      <div className="aura-boot">
         <style>{CSS}</style>
-        <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 28, fontWeight: 700 }}>pin<span style={{ color: "#4A7C5F" }}>ple</span></div>
-        <div className="spinner" />
+        <div className="aura-boot-inner">
+          <div className="aura-boot-badge">PINPLE · AURA SYSTEM</div>
+          <div className="aura-boot-mark">pin<span>ple</span></div>
+          <div className="aura-boot-bar" />
+          <div className="aura-boot-status">
+            {statusText}
+            <span className="aura-boot-dots"><span /><span /><span /></span>
+          </div>
+        </div>
+        <div className="aura-boot-footer">
+          BOOT · {String(secs).padStart(2, "0")}s ELAPSED
+        </div>
       </div>
     );
   }

@@ -254,7 +254,12 @@ export const appRouter = router({
         const cookieOptions = getSessionCookieOptions(ctx.req);
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
 
-        return { userId, success: true };
+        // Return the full user so the client can skip an extra auth.me roundtrip.
+        // On a cold start this saves ~20s because the follow-up call might
+        // otherwise land on a different lambda and re-trigger schema bootstrap.
+        const { getUserById } = await import("./db");
+        const user = await getUserById(userId);
+        return { userId, success: true, user };
       }),
 
     // 通用登录：identifier 可以是邮箱（含 @）或数字用户 ID
@@ -297,7 +302,7 @@ export const appRouter = router({
         const cookieOptions = getSessionCookieOptions(ctx.req);
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
 
-        return { userId: user.id, success: true };
+        return { userId: user.id, success: true, user };
       }),
 
     // 兼容旧前端：保留 loginWithEmail 作为 loginWithIdentifier 的薄包装
