@@ -1,0 +1,18 @@
+/*
+ * 全局 CSS 最小化重置。
+ * 主要样式由 App.tsx 内的 <style>{CSS}</style> 注入。
+ */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: #fafaf7;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}

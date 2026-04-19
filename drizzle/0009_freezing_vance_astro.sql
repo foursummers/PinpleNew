@@ -1,0 +1,2 @@
+ALTER TABLE `children` ADD `childOneGender` enum('girl','boy','unknown') DEFAULT 'unknown';--> statement-breakpoint
+ALTER TABLE `children` ADD `childTwoGender` enum('girl','boy','unknown') DEFAULT 'unknown';
