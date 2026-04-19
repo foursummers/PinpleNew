@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 import {
   Child,
   Event,
@@ -81,6 +82,7 @@ export async function getDb() {
   }
   // Self-healing schema bootstrap — guarded by a single shared promise so parallel
   // callers wait for the same work and never see a partially-migrated schema.
+  // We cap the wait at 8s so a slow DDL never causes FUNCTION_INVOCATION_FAILED.
   if (_db && !_schemaReadyPromise) {
     const dbRef = _db;
     _schemaReadyPromise = ensureSchema(dbRef).catch((err) => {
@@ -88,26 +90,37 @@ export async function getDb() {
     });
   }
   if (_schemaReadyPromise) {
-    await _schemaReadyPromise;
+    try {
+      await Promise.race([
+        _schemaReadyPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+      ]);
+    } catch (err) {
+      console.warn("[Database] ensureSchema wait failed:", err);
+    }
   }
   return _db;
 }
 
 /**
- * Idempotent schema bootstrap. Runs every cold start to ensure v4 fields & tables exist.
- * Each DDL is wrapped in try/catch — if a column already exists or the syntax isn't
- * supported on the server, we log and move on.
+ * Idempotent schema bootstrap. Runs once per cold start to ensure v4 fields & tables exist.
+ * Uses a dedicated short-lived mysql2 connection so any DDL quirks don't affect drizzle.
+ * Each DDL is wrapped in try/catch — if a column already exists, we log and move on.
  */
-async function ensureSchema(db: NonNullable<typeof _db>) {
-  const statements: string[] = [
-    // ── users v4 fields ──────────────────────────────────────────────
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `bio` varchar(500)",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `location` varchar(255)",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `skillTags` text",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `creditScore` int DEFAULT 100",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `passwordHash` varchar(255)",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `wechatOpenId` varchar(64)",
-    "ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `reportedCount` int DEFAULT 0",
+async function ensureSchema(_db: NonNullable<typeof _db>) {
+  if (!process.env.DATABASE_URL) return;
+
+  const alterUserCols: Array<{ name: string; def: string }> = [
+    { name: "bio", def: "varchar(500)" },
+    { name: "location", def: "varchar(255)" },
+    { name: "skillTags", def: "text" },
+    { name: "creditScore", def: "int DEFAULT 100" },
+    { name: "passwordHash", def: "varchar(255)" },
+    { name: "wechatOpenId", def: "varchar(64)" },
+    { name: "reportedCount", def: "int DEFAULT 0" },
+  ];
+
+  const createTables: string[] = [
     // ── password reset tokens ────────────────────────────────────────
     `CREATE TABLE IF NOT EXISTS \`password_reset_tokens\` (
       \`id\` int AUTO_INCREMENT NOT NULL,
@@ -212,43 +225,49 @@ async function ensureSchema(db: NonNullable<typeof _db>) {
     )`,
   ];
 
-  for (const stmt of statements) {
-    try {
-      await db.execute(sql.raw(stmt));
-    } catch (err: any) {
-      const msg = String(err?.message || err?.sqlMessage || err);
-      // Silently ignore: column already exists, table already exists, or syntax not supported (older MySQL)
-      if (
-        /Duplicate column|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR/i.test(msg) ||
-        err?.code === "ER_DUP_FIELDNAME" ||
-        err?.code === "ER_TABLE_EXISTS_ERROR"
-      ) {
-        continue;
+  let conn: mysql.Connection | null = null;
+  try {
+    conn = await mysql.createConnection(process.env.DATABASE_URL);
+
+    // 1) Check which columns already exist on `users` (portable, works on all MySQL versions)
+    const [rows] = await conn.query(
+      `SELECT COLUMN_NAME AS name FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
+    );
+    const existing = new Set(
+      Array.isArray(rows) ? (rows as any[]).map((r) => String(r?.name ?? r?.NAME ?? "")) : [],
+    );
+
+    // 2) Add any missing column via plain ALTER TABLE (no IF NOT EXISTS needed)
+    for (const col of alterUserCols) {
+      if (existing.has(col.name)) continue;
+      try {
+        await conn.query(`ALTER TABLE \`users\` ADD COLUMN \`${col.name}\` ${col.def}`);
+        console.log(`[Database] ensureSchema: added users.${col.name}`);
+      } catch (err: any) {
+        const msg = String(err?.message || err?.sqlMessage || err);
+        if (/Duplicate column|already exists|ER_DUP_FIELDNAME/i.test(msg)) continue;
+        console.warn(`[Database] ensureSchema ALTER users add ${col.name} failed:`, msg);
       }
-      // Older MySQL without ADD COLUMN IF NOT EXISTS support: try fallback per-column check
-      if (/You have an error in your SQL syntax/i.test(msg) && stmt.startsWith("ALTER TABLE")) {
-        const match = stmt.match(/ADD COLUMN IF NOT EXISTS `([^`]+)` (.+)$/);
-        if (match) {
-          const [, col, def] = match;
-          try {
-            const existsRows: any = await db.execute(
-              sql.raw(
-                `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = '${col}'`,
-              ),
-            );
-            const first = Array.isArray(existsRows) ? existsRows[0] : existsRows;
-            const row = Array.isArray(first) ? first[0] : first;
-            if (Number(row?.c ?? 0) === 0) {
-              await db.execute(sql.raw(`ALTER TABLE \`users\` ADD COLUMN \`${col}\` ${def}`));
-            }
-            continue;
-          } catch (innerErr) {
-            console.warn(`[Database] ensureSchema fallback failed for ${col}:`, innerErr);
-            continue;
-          }
-        }
+    }
+
+    // 3) Create missing tables with IF NOT EXISTS (works on MySQL 5.6+)
+    for (const stmt of createTables) {
+      try {
+        await conn.query(stmt);
+      } catch (err: any) {
+        const msg = String(err?.message || err?.sqlMessage || err);
+        if (/already exists|ER_TABLE_EXISTS_ERROR/i.test(msg)) continue;
+        console.warn(`[Database] ensureSchema CREATE TABLE failed:`, msg);
       }
-      console.warn(`[Database] ensureSchema stmt failed (continuing):`, msg);
+    }
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
