@@ -117,7 +117,7 @@ const CONTACTS = [
 
 // ─── CSS ──────────────────────────────────────────────────────────────────────
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -326,6 +326,319 @@ body { background: var(--c-bg); color: var(--c-ink); font-family: var(--ff-body)
 .divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; font-size: 12px; color: var(--c-ink3); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--c-border2); }
 
+/* ── AURA Auth Screen Overrides (scoped to .auth-screen) ── */
+.auth-screen {
+  position: relative;
+  min-height: 100vh;
+  background: #030407;
+  color: #FFFFFF;
+  font-family: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
+  overflow: hidden;
+  padding: 24px;
+}
+.auth-screen::before {
+  content: '';
+  position: absolute;
+  inset: -10%;
+  background:
+    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
+    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
+    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
+    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
+  filter: blur(20px);
+  animation: auraSweep 14s ease-in-out infinite alternate;
+  pointer-events: none;
+  z-index: 0;
+}
+.auth-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-size: 3px 3px;
+  opacity: 0.55;
+  mix-blend-mode: screen;
+  pointer-events: none;
+  z-index: 1;
+}
+@keyframes auraSweep {
+  0%   { transform: translate3d(-3%, -2%, 0) scale(1); }
+  100% { transform: translate3d(3%, 2%, 0) scale(1.06); }
+}
+
+.auth-tech-label {
+  position: absolute;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: rgba(255,255,255,0.32);
+  text-transform: uppercase;
+  z-index: 2;
+  pointer-events: none;
+}
+.auth-tech-label.tl { top: 28px; left: 28px; }
+.auth-tech-label.bl { bottom: 28px; left: 28px; }
+.auth-tech-label.tr { top: 28px; right: 28px; }
+.auth-tech-label.br { bottom: 28px; right: 28px; }
+
+.auth-screen .auth-card {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  max-width: 460px;
+  margin: 0 auto;
+  background: rgba(255,255,255,0.035);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 40px;
+  padding: 44px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 40px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+
+.auth-screen .auth-logo { text-align: left; margin-bottom: 0; }
+.auth-screen .auth-logo-mark {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 34px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+.auth-screen .auth-logo-mark span { color: rgba(255,255,255,0.55); font-weight: 300; }
+
+.auth-system-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: rgba(255,255,255,0.85);
+  background: rgba(255,255,255,0.08);
+  padding: 5px 12px;
+  border-radius: 999px;
+  align-self: flex-start;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.auth-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 32px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: #fff;
+  margin-top: 10px;
+}
+.auth-subtitle {
+  color: rgba(255,255,255,0.5);
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 6px;
+}
+
+.auth-screen .auth-tabs {
+  display: flex;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 999px;
+  padding: 4px;
+  margin-bottom: 0;
+  gap: 4px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.auth-screen .auth-tab {
+  color: rgba(255,255,255,0.55);
+  border-radius: 999px;
+  padding: 11px 16px;
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  transition: all .25s cubic-bezier(.16,1,.3,1);
+}
+.auth-screen .auth-tab:hover { color: rgba(255,255,255,0.85); }
+.auth-screen .auth-tab.active {
+  background: #FFFFFF;
+  color: #030407;
+  font-weight: 600;
+  box-shadow: 0 0 24px rgba(255,255,255,0.22);
+}
+
+.auth-sso-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.auth-btn-sso {
+  height: 56px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.05);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: all .2s ease;
+  text-decoration: none;
+}
+.auth-btn-sso:hover {
+  background: rgba(255,255,255,0.10);
+  transform: translateY(-2px);
+  border-color: rgba(255,255,255,0.16);
+}
+.auth-btn-sso svg { width: 18px; height: 18px; }
+
+.auth-screen .divider {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: rgba(255,255,255,0.3);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.auth-screen .divider::before,
+.auth-screen .divider::after {
+  content: "";
+  flex: 1;
+  height: 2px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 999px;
+}
+
+.auth-screen .field { margin-bottom: 0; display: flex; flex-direction: column; gap: 8px; }
+.auth-screen .field label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  padding-left: 20px;
+  margin-bottom: 0;
+}
+.auth-screen .field input {
+  width: 100%;
+  height: 56px;
+  padding: 0 24px;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.05);
+  color: #fff;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 15px;
+  transition: background 0.2s, border-color 0.2s;
+  outline: none;
+}
+.auth-screen .field input::placeholder { color: rgba(255,255,255,0.28); }
+.auth-screen .field input:focus {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
+}
+
+.auth-screen .btn-primary {
+  width: 100%;
+  height: 64px;
+  padding: 0;
+  margin: 0;
+  border-radius: 999px;
+  background: #FFFFFF;
+  color: #030407;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  box-shadow: 0 0 40px rgba(255,255,255,0.18);
+  transition: all .2s ease;
+}
+.auth-screen .btn-primary:hover:not(:disabled) {
+  background: #E0EDFF;
+  transform: translateY(-2px);
+  box-shadow: 0 0 60px rgba(224,237,255,0.34);
+}
+.auth-screen .btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.auth-screen .btn-outline {
+  width: 100%;
+  height: 56px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.05);
+  color: #fff;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: all .2s ease;
+}
+.auth-screen .btn-outline:hover {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.16);
+  transform: translateY(-2px);
+}
+
+.auth-screen .alert {
+  padding: 12px 18px;
+  border-radius: 18px;
+  font-size: 13px;
+  margin: 0;
+  font-family: 'Space Grotesk', sans-serif;
+}
+.auth-screen .alert-error {
+  background: rgba(196,80,88,0.14);
+  color: #FFB1B6;
+  border: 1px solid rgba(196,80,88,0.30);
+}
+.auth-screen .alert-success {
+  background: rgba(74,205,160,0.12);
+  color: #9EF5D0;
+  border: 1px solid rgba(74,205,160,0.30);
+}
+
+.auth-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: rgba(255,255,255,0.3);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0 4px;
+}
+
+@media (max-width: 540px) {
+  .auth-screen { padding: 16px; }
+  .auth-screen .auth-card { padding: 32px 24px; border-radius: 32px; }
+  .auth-title { font-size: 26px; }
+  .auth-tech-label.tr, .auth-tech-label.br { display: none; }
+}
+
 /* ── Tasks ── */
 .task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .task-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); padding: 16px; position: relative; overflow: hidden; }
@@ -495,43 +808,129 @@ function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
   return (
     <div className="auth-screen">
       <style>{CSS}</style>
+
+      {/* 科技感角标 */}
+      <div className="auth-tech-label tl">SYS.TRUST // ON-LINE</div>
+      <div className="auth-tech-label bl">UPLINK_ESTABLISHED_</div>
+      <div className="auth-tech-label tr">PINPLE · V04.00</div>
+      <div className="auth-tech-label br">[ 拼 · 朋 · 友 ]</div>
+
       <div className="auth-card fade-up">
+        {/* 头部：品牌 + 标题 */}
         <div className="auth-logo">
-          <div className="auth-logo-mark">pin<span>ple</span></div>
-          <div style={{ fontSize: 13, color: "var(--c-ink3)", marginTop: 4 }}>养孩子要拼，活下来更要拼。</div>
+          <div className="auth-system-badge">PINPLE.IDENTITY</div>
+          <div className="auth-logo-mark" style={{ marginTop: 14 }}>pin<span>ple</span></div>
+          <h1 className="auth-title">
+            {mode === "login" ? "欢迎回来" : "加入拼朋友"}
+          </h1>
+          <p className="auth-subtitle">
+            {mode === "login"
+              ? "信任圈社交 · 技能共享市场 · 用你的邻居守护你的孩子。"
+              : "创建你的信任身份，进入真实社区。"}
+          </p>
         </div>
+
+        {/* 登录 / 注册 切换 */}
         <div className="auth-tabs">
-          <button className={`auth-tab ${mode === "login" ? "active" : ""}`} onClick={() => { setMode("login"); setError(""); }}>登录</button>
-          <button className={`auth-tab ${mode === "register" ? "active" : ""}`} onClick={() => { setMode("register"); setError(""); }}>注册账号</button>
+          <button
+            className={`auth-tab ${mode === "login" ? "active" : ""}`}
+            onClick={() => { setMode("login"); setError(""); }}
+          >
+            登录
+          </button>
+          <button
+            className={`auth-tab ${mode === "register" ? "active" : ""}`}
+            onClick={() => { setMode("register"); setError(""); }}
+          >
+            注册账号
+          </button>
         </div>
+
+        {/* SSO 登录 */}
+        <div className="auth-sso-grid">
+          <a href="/api/oauth/callback?provider=google" className="auth-btn-sso">
+            <GoogleIcon /> Google
+          </a>
+          <button
+            type="button"
+            className="auth-btn-sso"
+            onClick={() => setError("微信登录即将开放，敬请期待")}
+          >
+            <WeChatIcon /> 微信
+          </button>
+        </div>
+
+        <div className="divider">STANDARD PROTOCOL</div>
+
         {error && <AlertMsg type="error" msg={error} />}
         {success && <AlertMsg type="success" msg={success} />}
+
         {mode === "register" && (
           <div className="field">
-            <label>昵称</label>
-            <input placeholder="你的名字" value={name} onChange={e => setName(e.target.value)} />
+            <label>NICKNAME · 昵称</label>
+            <input
+              placeholder="例如：苏瑾"
+              value={name}
+              onChange={e => setName(e.target.value)}
+            />
           </div>
         )}
         <div className="field">
-          <label>邮箱</label>
-          <input type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} />
+          <label>IDENTIFIER · 邮箱</label>
+          <input
+            type="email"
+            placeholder="you@domain.net"
+            autoComplete="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+          />
         </div>
         <div className="field">
-          <label>密码{mode === "register" ? "（至少8位）" : ""}</label>
-          <input type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && submit()} />
+          <label>PASSCODE · 密码{mode === "register" ? " // ≥ 8" : ""}</label>
+          <input
+            type="password"
+            placeholder="••••••••••••"
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && submit()}
+          />
         </div>
+
         <button className="btn-primary" onClick={submit} disabled={loading}>
-          {loading ? "处理中…" : mode === "login" ? "登录" : "创建账号"}
+          {loading
+            ? "处理中…"
+            : mode === "login"
+              ? <>INITIALIZE UPLINK <span aria-hidden>→</span></>
+              : <>CREATE IDENTITY <span aria-hidden>→</span></>}
         </button>
-        <div className="divider">或</div>
-        <a href="/api/oauth/callback?provider=google" style={{ display: "block", textDecoration: "none" }}>
-          <button className="btn-outline" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-            <span>G</span> Google 账号登录
-          </button>
-        </a>
+
+        <div className="auth-footer">
+          <span>SECURE · E2E · TRUST-RING</span>
+          <span>{new Date().getFullYear()} · PINPLE</span>
+        </div>
       </div>
     </div>
+  );
+}
+
+// 内联 SSO 图标（避免引入额外依赖）
+function GoogleIcon() {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden>
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.4-.4-3.5z" />
+      <path fill="#FF3D00" d="M6.3 14.1l6.6 4.8C14.6 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.1z" />
+      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.1 35.2 26.7 36 24 36c-5.2 0-9.6-3.3-11.2-7.9l-6.5 5C9.6 39.7 16.2 44 24 44z" />
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.5l6.2 5.2C41.5 35.8 44 30.4 44 24c0-1.2-.1-2.4-.4-3.5z" />
+    </svg>
+  );
+}
+function WeChatIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden fill="currentColor">
+      <path d="M9.5 3C4.8 3 1 6.1 1 10c0 2.1 1.1 4 2.9 5.3L3 18l3-1.6c.9.2 1.8.3 2.7.3h.6c-.2-.6-.3-1.2-.3-1.9 0-3.6 3.4-6.5 7.6-6.5h.5C16.4 5.3 13.3 3 9.5 3zM7 8.5a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2z" />
+      <path d="M23 14.8c0-3-2.9-5.4-6.5-5.4S10 11.8 10 14.8c0 3 2.9 5.4 6.5 5.4.8 0 1.5-.1 2.2-.3l2.3 1.2-.7-2.1c1.7-1 2.7-2.5 2.7-4.2zm-8.5-.7a.8.8 0 110-1.6.8.8 0 010 1.6zm4 0a.8.8 0 110-1.6.8.8 0 010 1.6z" />
+    </svg>
   );
 }
 
