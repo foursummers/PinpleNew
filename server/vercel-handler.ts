@@ -1,9 +1,10 @@
 /**
- * Vercel Serverless entry point.
+ * Vercel Serverless handler (source).
  *
- * vercel.json 将所有 /api/* 重写到 /api，由这里的 Express 继续分发。
- * 通过 JSON 错误中间件，保证任何运行时异常都返回 JSON，
- * 不会让前端收到 Vercel 默认 HTML 500 页（"A server error has occurred"）。
+ * This file is bundled at build time into `api/index.js` via esbuild,
+ * producing a self-contained ESM output so Node doesn't need to resolve
+ * any internal relative imports at runtime (which otherwise fail with
+ * ERR_MODULE_NOT_FOUND because ESM requires explicit `.js` extensions).
  */
 
 import "dotenv/config";
@@ -11,9 +12,9 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 
-import { createContext } from "../server/_core/context";
-import { registerOAuthRoutes } from "../server/_core/oauth";
-import { appRouter } from "../server/routers";
+import { createContext } from "./_core/context";
+import { registerOAuthRoutes } from "./_core/oauth";
+import { appRouter } from "./routers";
 
 const app = express();
 
@@ -42,7 +43,7 @@ app.use(
     onError({ error, path }) {
       console.error(`[trpc] error on ${path ?? "?"}:`, error);
     },
-  })
+  }),
 );
 
 app.all("*", (req: Request, res: Response) => {
@@ -54,13 +55,14 @@ app.all("*", (req: Request, res: Response) => {
   });
 });
 
-// 兜底 JSON 错误处理：保证永远不会把 HTML 错误页返回给前端
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("[api] Unhandled error:", err);
+// Catch-all JSON error handler: guarantees we never return HTML error pages.
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const e = err as { message?: string; stack?: string };
+  console.error("[api] Unhandled error:", e?.message || err, e?.stack);
   if (res.headersSent) return;
   res.status(500).json({
     error: "ServerError",
-    message: err?.message || "Internal server error",
+    message: e?.message || "Internal server error",
   });
 });
 

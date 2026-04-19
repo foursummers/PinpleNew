@@ -8,6 +8,10 @@ dist/
 build/
 *.dist
 
+# Generated serverless bundle (built from server/vercel-handler.ts at deploy time)
+api/index.js
+api/index.js.map
+
 # Environment variables
 .env
 .env.local
