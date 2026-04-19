@@ -9,6 +9,251 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// drizzle/0000_boring_nehzno.sql
+var boring_nehzno_default;
+var init_boring_nehzno = __esm({
+  "drizzle/0000_boring_nehzno.sql"() {
+    boring_nehzno_default = "CREATE TABLE `users` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`openId` varchar(64) NOT NULL,\r\n	`name` text,\r\n	`email` varchar(320),\r\n	`loginMethod` varchar(64),\r\n	`role` enum('user','admin') NOT NULL DEFAULT 'user',\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	`lastSignedIn` timestamp NOT NULL DEFAULT (now()),\r\n	CONSTRAINT `users_id` PRIMARY KEY(`id`),\r\n	CONSTRAINT `users_openId_unique` UNIQUE(`openId`)\r\n);\r\n";
+  }
+});
+
+// drizzle/0001_sleepy_harrier.sql
+var sleepy_harrier_default;
+var init_sleepy_harrier = __esm({
+  "drizzle/0001_sleepy_harrier.sql"() {
+    sleepy_harrier_default = "CREATE TABLE `children` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`nickname` varchar(50) NOT NULL,\r\n	`fullName` varchar(100),\r\n	`gender` enum('girl','boy','unknown') DEFAULT 'unknown',\r\n	`birthDate` timestamp,\r\n	`avatarUrl` text,\r\n	`color` varchar(20) DEFAULT '#FF6B6B',\r\n	`embryoTransferDate` timestamp,\r\n	`embryoDay` int DEFAULT 5,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `children_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `events` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`title` varchar(200) NOT NULL,\r\n	`description` text,\r\n	`location` varchar(300),\r\n	`locationLat` varchar(30),\r\n	`locationLng` varchar(30),\r\n	`coverUrl` text,\r\n	`eventDate` timestamp NOT NULL,\r\n	`inviteToken` varchar(32) NOT NULL,\r\n	`isPublic` boolean DEFAULT true,\r\n	`createdBy` int NOT NULL,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `events_id` PRIMARY KEY(`id`),\r\n	CONSTRAINT `events_inviteToken_unique` UNIQUE(`inviteToken`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `families` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`name` varchar(100) NOT NULL,\r\n	`description` text,\r\n	`coverUrl` text,\r\n	`createdBy` int NOT NULL,\r\n	`inviteCode` varchar(16) NOT NULL,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `families_id` PRIMARY KEY(`id`),\r\n	CONSTRAINT `families_inviteCode_unique` UNIQUE(`inviteCode`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `family_members` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`userId` int NOT NULL,\r\n	`role` enum('admin','collaborator','observer') NOT NULL DEFAULT 'observer',\r\n	`nickname` varchar(50),\r\n	`joinedAt` timestamp NOT NULL DEFAULT (now()),\r\n	CONSTRAINT `family_members_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `milestone_templates` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`ageMonthMin` int NOT NULL,\r\n	`ageMonthMax` int NOT NULL,\r\n	`title` varchar(200) NOT NULL,\r\n	`description` text,\r\n	`category` enum('development','nutrition','vaccination','checkup','safety') NOT NULL,\r\n	`isBuiltIn` boolean DEFAULT true,\r\n	CONSTRAINT `milestone_templates_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `routine_tasks` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`childId` int,\r\n	`title` varchar(100) NOT NULL,\r\n	`description` text,\r\n	`icon` varchar(50) DEFAULT 'circle',\r\n	`color` varchar(20) DEFAULT '#4ECDC4',\r\n	`category` enum('feeding','sleep','checkup','play','bath','other') DEFAULT 'other',\r\n	`repeatRule` varchar(100),\r\n	`assignedTo` int,\r\n	`isActive` boolean DEFAULT true,\r\n	`createdBy` int NOT NULL,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `routine_tasks_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `rsvps` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`eventId` int NOT NULL,\r\n	`guestName` varchar(100) NOT NULL,\r\n	`guestContact` varchar(200),\r\n	`status` enum('attending','maybe','declined') NOT NULL,\r\n	`note` text,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	CONSTRAINT `rsvps_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `task_checkins` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`taskId` int NOT NULL,\r\n	`childId` int,\r\n	`note` text,\r\n	`checkedBy` int NOT NULL,\r\n	`checkedAt` timestamp NOT NULL DEFAULT (now()),\r\n	CONSTRAINT `task_checkins_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nCREATE TABLE `timeline_events` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`childId` int NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`type` enum('pregnancy','milestone','post','checkup','vaccination','system') NOT NULL,\r\n	`title` varchar(200) NOT NULL,\r\n	`content` text,\r\n	`mediaUrls` text,\r\n	`xiaohongshuUrl` text,\r\n	`eventDate` timestamp NOT NULL,\r\n	`createdBy` int NOT NULL,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `timeline_events_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nALTER TABLE `users` ADD `avatarUrl` text;";
+  }
+});
+
+// drizzle/0002_tired_blink.sql
+var tired_blink_default;
+var init_tired_blink = __esm({
+  "drizzle/0002_tired_blink.sql"() {
+    tired_blink_default = "CREATE TABLE `connections` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`requesterId` int NOT NULL,\r\n	`receiverId` int NOT NULL,\r\n	`status` enum('pending','accepted','blocked') NOT NULL DEFAULT 'pending',\r\n	`note` varchar(200),\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `connections_id` PRIMARY KEY(`id`)\r\n);\r\n";
+  }
+});
+
+// drizzle/0003_empty_photon.sql
+var empty_photon_default;
+var init_empty_photon = __esm({
+  "drizzle/0003_empty_photon.sql"() {
+    empty_photon_default = "ALTER TABLE `children` ADD `pregnancyRefDate` timestamp;--> statement-breakpoint\r\nALTER TABLE `children` ADD `pregnancyWeeksAtRef` int DEFAULT 0;--> statement-breakpoint\r\nALTER TABLE `children` ADD `pregnancyDaysAtRef` int DEFAULT 0;--> statement-breakpoint\r\nALTER TABLE `children` ADD `isMultiple` boolean DEFAULT false;";
+  }
+});
+
+// drizzle/0004_previous_sprite.sql
+var previous_sprite_default;
+var init_previous_sprite = __esm({
+  "drizzle/0004_previous_sprite.sql"() {
+    previous_sprite_default = "ALTER TABLE `connections` ADD `category` enum('life','work','family','kids','pets') DEFAULT 'life' NOT NULL;--> statement-breakpoint\r\nALTER TABLE `connections` ADD `hasUpdate` boolean DEFAULT false NOT NULL;--> statement-breakpoint\r\nALTER TABLE `task_checkins` ADD `value` varchar(50);--> statement-breakpoint\r\nALTER TABLE `task_checkins` ADD `unit` varchar(20);";
+  }
+});
+
+// drizzle/0005_polite_nemesis.sql
+var polite_nemesis_default;
+var init_polite_nemesis = __esm({
+  "drizzle/0005_polite_nemesis.sql"() {
+    polite_nemesis_default = "ALTER TABLE `routine_tasks` ADD `taskType` enum('frequency','value') DEFAULT 'frequency';--> statement-breakpoint\r\nALTER TABLE `routine_tasks` ADD `valueUnit` varchar(30);";
+  }
+});
+
+// drizzle/0006_flippant_polaris.sql
+var flippant_polaris_default;
+var init_flippant_polaris = __esm({
+  "drizzle/0006_flippant_polaris.sql"() {
+    flippant_polaris_default = "CREATE TABLE `event_join_requests` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`eventId` int NOT NULL,\r\n	`requesterId` int NOT NULL,\r\n	`hostId` int NOT NULL,\r\n	`status` enum('pending','approved','rejected') NOT NULL DEFAULT 'pending',\r\n	`message` text,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `event_join_requests_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nALTER TABLE `timeline_events` ADD `isPublic` boolean DEFAULT false NOT NULL;";
+  }
+});
+
+// drizzle/0007_many_stark_industries.sql
+var many_stark_industries_default;
+var init_many_stark_industries = __esm({
+  "drizzle/0007_many_stark_industries.sql"() {
+    many_stark_industries_default = "ALTER TABLE `family_members` ADD `birthDate` timestamp;--> statement-breakpoint\r\nALTER TABLE `family_members` ADD `anniversaryDate` timestamp;--> statement-breakpoint\r\nALTER TABLE `users` ADD `birthDate` timestamp;";
+  }
+});
+
+// drizzle/0008_public_junta.sql
+var public_junta_default;
+var init_public_junta = __esm({
+  "drizzle/0008_public_junta.sql"() {
+    public_junta_default = "CREATE TABLE `member_events` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`familyId` int NOT NULL,\r\n	`userId` int NOT NULL,\r\n	`title` varchar(100) NOT NULL,\r\n	`eventType` enum('birthday','anniversary','custom') NOT NULL DEFAULT 'custom',\r\n	`eventDate` timestamp NOT NULL,\r\n	`isYearly` boolean NOT NULL DEFAULT true,\r\n	`note` text,\r\n	`createdBy` int NOT NULL,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\r\n	CONSTRAINT `member_events_id` PRIMARY KEY(`id`)\r\n);\r\n--> statement-breakpoint\r\nALTER TABLE `children` ADD `childOneName` varchar(50);--> statement-breakpoint\r\nALTER TABLE `children` ADD `childTwoName` varchar(50);--> statement-breakpoint\r\nALTER TABLE `children` ADD `notes` text;";
+  }
+});
+
+// drizzle/0009_freezing_vance_astro.sql
+var freezing_vance_astro_default;
+var init_freezing_vance_astro = __esm({
+  "drizzle/0009_freezing_vance_astro.sql"() {
+    freezing_vance_astro_default = "ALTER TABLE `children` ADD `childOneGender` enum('girl','boy','unknown') DEFAULT 'unknown';--> statement-breakpoint\r\nALTER TABLE `children` ADD `childTwoGender` enum('girl','boy','unknown') DEFAULT 'unknown';";
+  }
+});
+
+// drizzle/0010_young_firestar.sql
+var young_firestar_default;
+var init_young_firestar = __esm({
+  "drizzle/0010_young_firestar.sql"() {
+    young_firestar_default = "CREATE TABLE `event_images` (\r\n	`id` int AUTO_INCREMENT NOT NULL,\r\n	`eventId` int NOT NULL,\r\n	`imageUrl` text NOT NULL,\r\n	`sortOrder` int DEFAULT 0,\r\n	`createdAt` timestamp NOT NULL DEFAULT (now()),\r\n	CONSTRAINT `event_images_id` PRIMARY KEY(`id`)\r\n);\r\n";
+  }
+});
+
+// drizzle/0011_password_resets.sql
+var password_resets_default;
+var init_password_resets = __esm({
+  "drizzle/0011_password_resets.sql"() {
+    password_resets_default = "CREATE TABLE IF NOT EXISTS `password_reset_tokens` (\r\n  `id` int AUTO_INCREMENT NOT NULL,\r\n  `userId` int NOT NULL,\r\n  `token` varchar(128) NOT NULL,\r\n  `expiresAt` timestamp NOT NULL,\r\n  `usedAt` timestamp NULL,\r\n  `createdAt` timestamp NOT NULL DEFAULT (now()),\r\n  CONSTRAINT `password_reset_tokens_id` PRIMARY KEY(`id`),\r\n  CONSTRAINT `password_reset_tokens_token_unique` UNIQUE(`token`)\r\n);\r\n";
+  }
+});
+
+// server/_core/bootstrap-sql.ts
+function getBootstrapStatements() {
+  return ALL_BOOTSTRAP_SQL.split(/-->\s*statement-breakpoint/g).map((s) => s.trim()).filter((s) => s.length > 0).map(
+    (s) => (
+      // CREATE TABLE `name` → CREATE TABLE IF NOT EXISTS `name`
+      s.replace(/^CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/i, "CREATE TABLE IF NOT EXISTS ")
+    )
+  );
+}
+var V4_ADDITIONS, ALL_BOOTSTRAP_SQL;
+var init_bootstrap_sql = __esm({
+  "server/_core/bootstrap-sql.ts"() {
+    "use strict";
+    init_boring_nehzno();
+    init_sleepy_harrier();
+    init_tired_blink();
+    init_empty_photon();
+    init_previous_sprite();
+    init_polite_nemesis();
+    init_flippant_polaris();
+    init_many_stark_industries();
+    init_public_junta();
+    init_freezing_vance_astro();
+    init_young_firestar();
+    init_password_resets();
+    V4_ADDITIONS = `
+ALTER TABLE \`users\` ADD COLUMN \`bio\` varchar(500);
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`location\` varchar(255);
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`skillTags\` text;
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`creditScore\` int DEFAULT 100;
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`passwordHash\` varchar(255);
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`wechatOpenId\` varchar(64);
+--> statement-breakpoint
+ALTER TABLE \`users\` ADD COLUMN \`reportedCount\` int DEFAULT 0;
+--> statement-breakpoint
+CREATE TABLE \`recommendations\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`userId\` int NOT NULL,
+  \`recommenderId\` int NOT NULL,
+  \`targetUserId\` int NOT NULL,
+  \`context\` varchar(255),
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`recommendations_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`skills\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`userId\` int NOT NULL,
+  \`name\` varchar(255) NOT NULL,
+  \`category\` varchar(100),
+  \`description\` text,
+  \`images\` text,
+  \`priceMin\` decimal(10,2),
+  \`priceMax\` decimal(10,2),
+  \`location\` varchar(255),
+  \`serviceRadius\` int,
+  \`availableTimes\` text,
+  \`contactMethod\` varchar(50),
+  \`status\` enum('active','inactive') DEFAULT 'active',
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`skills_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`help_requests\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`userId\` int NOT NULL,
+  \`title\` varchar(255) NOT NULL,
+  \`description\` text,
+  \`skillTags\` text,
+  \`budgetMin\` decimal(10,2),
+  \`budgetMax\` decimal(10,2),
+  \`location\` varchar(255),
+  \`urgency\` enum('low','medium','high') DEFAULT 'medium',
+  \`deadline\` timestamp NULL,
+  \`status\` enum('open','matched','closed') DEFAULT 'open',
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`help_requests_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`skill_matches\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`requestId\` int NOT NULL,
+  \`skillId\` int NOT NULL,
+  \`providerId\` int NOT NULL,
+  \`status\` enum('pending','accepted','rejected','completed') DEFAULT 'pending',
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`skill_matches_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`reviews\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`fromUserId\` int NOT NULL,
+  \`toUserId\` int NOT NULL,
+  \`matchId\` int NOT NULL,
+  \`rating\` int NOT NULL,
+  \`comment\` text,
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`reviews_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`user_reports\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`reporterId\` int NOT NULL,
+  \`reportedUserId\` int NOT NULL,
+  \`reason\` enum('inappropriate','fraud','harassment','other') DEFAULT 'other',
+  \`description\` text,
+  \`evidence\` text,
+  \`status\` enum('pending','approved','rejected') DEFAULT 'pending',
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT \`user_reports_id\` PRIMARY KEY(\`id\`)
+);
+--> statement-breakpoint
+CREATE TABLE \`user_blocks\` (
+  \`id\` int AUTO_INCREMENT NOT NULL,
+  \`userId\` int NOT NULL,
+  \`blockedUserId\` int NOT NULL,
+  \`createdAt\` timestamp NOT NULL DEFAULT (now()),
+  CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
+);
+`;
+    ALL_BOOTSTRAP_SQL = [
+      boring_nehzno_default,
+      sleepy_harrier_default,
+      tired_blink_default,
+      empty_photon_default,
+      previous_sprite_default,
+      polite_nemesis_default,
+      flippant_polaris_default,
+      many_stark_industries_default,
+      public_junta_default,
+      freezing_vance_astro_default,
+      young_firestar_default,
+      password_resets_default,
+      V4_ADDITIONS
+    ].join("\n--> statement-breakpoint\n");
+  }
+});
+
 // drizzle/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
@@ -534,7 +779,7 @@ async function getDb() {
     try {
       await Promise.race([
         _schemaReadyPromise,
-        new Promise((resolve) => setTimeout(resolve, 8e3))
+        new Promise((resolve) => setTimeout(resolve, 2e4))
       ]);
     } catch (err) {
       console.warn("[Database] ensureSchema wait failed:", err);
@@ -544,149 +789,33 @@ async function getDb() {
 }
 async function ensureSchema(_db2) {
   if (!process.env.DATABASE_URL) return;
-  const alterUserCols = [
-    { name: "bio", def: "varchar(500)" },
-    { name: "location", def: "varchar(255)" },
-    { name: "skillTags", def: "text" },
-    { name: "creditScore", def: "int DEFAULT 100" },
-    { name: "passwordHash", def: "varchar(255)" },
-    { name: "wechatOpenId", def: "varchar(64)" },
-    { name: "reportedCount", def: "int DEFAULT 0" }
-  ];
-  const createTables = [
-    // ── password reset tokens ────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`password_reset_tokens\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`token\` varchar(128) NOT NULL,
-      \`expiresAt\` timestamp NOT NULL,
-      \`usedAt\` timestamp NULL,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      CONSTRAINT \`password_reset_tokens_id\` PRIMARY KEY(\`id\`),
-      CONSTRAINT \`password_reset_tokens_token_unique\` UNIQUE(\`token\`)
-    )`,
-    // ── recommendations ──────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`recommendations\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`recommenderId\` int NOT NULL,
-      \`targetUserId\` int NOT NULL,
-      \`context\` varchar(255),
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`recommendations_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── skills ───────────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`skills\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`name\` varchar(255) NOT NULL,
-      \`category\` varchar(100),
-      \`description\` text,
-      \`images\` text,
-      \`priceMin\` decimal(10,2),
-      \`priceMax\` decimal(10,2),
-      \`location\` varchar(255),
-      \`serviceRadius\` int,
-      \`availableTimes\` text,
-      \`contactMethod\` varchar(50),
-      \`status\` enum('active','inactive') DEFAULT 'active',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`skills_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── help_requests ────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`help_requests\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`title\` varchar(255) NOT NULL,
-      \`description\` text,
-      \`skillTags\` text,
-      \`budgetMin\` decimal(10,2),
-      \`budgetMax\` decimal(10,2),
-      \`location\` varchar(255),
-      \`urgency\` enum('low','medium','high') DEFAULT 'medium',
-      \`deadline\` timestamp NULL,
-      \`status\` enum('open','matched','closed') DEFAULT 'open',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`help_requests_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── skill_matches ────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`skill_matches\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`requestId\` int NOT NULL,
-      \`skillId\` int NOT NULL,
-      \`providerId\` int NOT NULL,
-      \`status\` enum('pending','accepted','rejected','completed') DEFAULT 'pending',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`skill_matches_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── reviews ──────────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`reviews\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`fromUserId\` int NOT NULL,
-      \`toUserId\` int NOT NULL,
-      \`matchId\` int NOT NULL,
-      \`rating\` int NOT NULL,
-      \`comment\` text,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`reviews_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── user_reports ─────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`user_reports\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`reporterId\` int NOT NULL,
-      \`reportedUserId\` int NOT NULL,
-      \`reason\` enum('inappropriate','fraud','harassment','other') DEFAULT 'other',
-      \`description\` text,
-      \`evidence\` text,
-      \`status\` enum('pending','approved','rejected') DEFAULT 'pending',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`user_reports_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── user_blocks ──────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`user_blocks\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`blockedUserId\` int NOT NULL,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
-    )`
-  ];
+  const statements = getBootstrapStatements();
   let conn = null;
+  const startedAt = Date.now();
+  let applied = 0;
+  let skipped = 0;
   try {
     conn = await mysql.createConnection(process.env.DATABASE_URL);
-    const [rows] = await conn.query(
-      `SELECT COLUMN_NAME AS name FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`
-    );
-    const existing = new Set(
-      Array.isArray(rows) ? rows.map((r) => String(r?.name ?? r?.NAME ?? "")) : []
-    );
-    for (const col of alterUserCols) {
-      if (existing.has(col.name)) continue;
-      try {
-        await conn.query(`ALTER TABLE \`users\` ADD COLUMN \`${col.name}\` ${col.def}`);
-        console.log(`[Database] ensureSchema: added users.${col.name}`);
-      } catch (err) {
-        const msg = String(err?.message || err?.sqlMessage || err);
-        if (/Duplicate column|already exists|ER_DUP_FIELDNAME/i.test(msg)) continue;
-        console.warn(`[Database] ensureSchema ALTER users add ${col.name} failed:`, msg);
-      }
-    }
-    for (const stmt of createTables) {
+    for (const stmt of statements) {
       try {
         await conn.query(stmt);
+        applied++;
       } catch (err) {
         const msg = String(err?.message || err?.sqlMessage || err);
-        if (/already exists|ER_TABLE_EXISTS_ERROR/i.test(msg)) continue;
-        console.warn(`[Database] ensureSchema CREATE TABLE failed:`, msg);
+        if (/Duplicate column|Duplicate key|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR|ER_DUP_KEYNAME/i.test(
+          msg
+        )) {
+          skipped++;
+          continue;
+        }
+        console.warn(
+          `[Database] ensureSchema stmt failed (continuing): ${msg} :: ${stmt.slice(0, 120)}...`
+        );
       }
     }
+    console.log(
+      `[Database] ensureSchema done \u2014 applied=${applied} skipped=${skipped} total=${statements.length} in ${Date.now() - startedAt}ms`
+    );
   } finally {
     if (conn) {
       try {
@@ -1643,6 +1772,7 @@ var _db, _dbCreatedAt, _schemaReadyPromise, DB_MAX_AGE_MS;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
+    init_bootstrap_sql();
     init_schema();
     _db = null;
     _dbCreatedAt = 0;

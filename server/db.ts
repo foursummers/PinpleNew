@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
+import { getBootstrapStatements } from "./_core/bootstrap-sql";
 import {
   Child,
   Event,
@@ -93,7 +94,7 @@ export async function getDb() {
     try {
       await Promise.race([
         _schemaReadyPromise,
-        new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+        new Promise<void>((resolve) => setTimeout(resolve, 20000)),
       ]);
     } catch (err) {
       console.warn("[Database] ensureSchema wait failed:", err);
@@ -103,164 +104,46 @@ export async function getDb() {
 }
 
 /**
- * Idempotent schema bootstrap. Runs once per cold start to ensure v4 fields & tables exist.
- * Uses a dedicated short-lived mysql2 connection so any DDL quirks don't affect drizzle.
- * Each DDL is wrapped in try/catch — if a column already exists, we log and move on.
+ * Idempotent schema bootstrap. Runs once per cold start.
+ *
+ * Uses all drizzle migration SQL embedded at build time (esbuild text loader) +
+ * v4 column/table additions. `CREATE TABLE` is rewritten to `IF NOT EXISTS`
+ * so fresh DBs get fully provisioned; errors on already-existing columns are
+ * swallowed so partially-migrated DBs get topped up.
  */
 async function ensureSchema(_db: NonNullable<typeof _db>) {
   if (!process.env.DATABASE_URL) return;
 
-  const alterUserCols: Array<{ name: string; def: string }> = [
-    { name: "bio", def: "varchar(500)" },
-    { name: "location", def: "varchar(255)" },
-    { name: "skillTags", def: "text" },
-    { name: "creditScore", def: "int DEFAULT 100" },
-    { name: "passwordHash", def: "varchar(255)" },
-    { name: "wechatOpenId", def: "varchar(64)" },
-    { name: "reportedCount", def: "int DEFAULT 0" },
-  ];
-
-  const createTables: string[] = [
-    // ── password reset tokens ────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`password_reset_tokens\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`token\` varchar(128) NOT NULL,
-      \`expiresAt\` timestamp NOT NULL,
-      \`usedAt\` timestamp NULL,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      CONSTRAINT \`password_reset_tokens_id\` PRIMARY KEY(\`id\`),
-      CONSTRAINT \`password_reset_tokens_token_unique\` UNIQUE(\`token\`)
-    )`,
-    // ── recommendations ──────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`recommendations\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`recommenderId\` int NOT NULL,
-      \`targetUserId\` int NOT NULL,
-      \`context\` varchar(255),
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`recommendations_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── skills ───────────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`skills\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`name\` varchar(255) NOT NULL,
-      \`category\` varchar(100),
-      \`description\` text,
-      \`images\` text,
-      \`priceMin\` decimal(10,2),
-      \`priceMax\` decimal(10,2),
-      \`location\` varchar(255),
-      \`serviceRadius\` int,
-      \`availableTimes\` text,
-      \`contactMethod\` varchar(50),
-      \`status\` enum('active','inactive') DEFAULT 'active',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`skills_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── help_requests ────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`help_requests\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`title\` varchar(255) NOT NULL,
-      \`description\` text,
-      \`skillTags\` text,
-      \`budgetMin\` decimal(10,2),
-      \`budgetMax\` decimal(10,2),
-      \`location\` varchar(255),
-      \`urgency\` enum('low','medium','high') DEFAULT 'medium',
-      \`deadline\` timestamp NULL,
-      \`status\` enum('open','matched','closed') DEFAULT 'open',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`help_requests_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── skill_matches ────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`skill_matches\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`requestId\` int NOT NULL,
-      \`skillId\` int NOT NULL,
-      \`providerId\` int NOT NULL,
-      \`status\` enum('pending','accepted','rejected','completed') DEFAULT 'pending',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`skill_matches_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── reviews ──────────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`reviews\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`fromUserId\` int NOT NULL,
-      \`toUserId\` int NOT NULL,
-      \`matchId\` int NOT NULL,
-      \`rating\` int NOT NULL,
-      \`comment\` text,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`reviews_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── user_reports ─────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`user_reports\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`reporterId\` int NOT NULL,
-      \`reportedUserId\` int NOT NULL,
-      \`reason\` enum('inappropriate','fraud','harassment','other') DEFAULT 'other',
-      \`description\` text,
-      \`evidence\` text,
-      \`status\` enum('pending','approved','rejected') DEFAULT 'pending',
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      \`updatedAt\` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-      CONSTRAINT \`user_reports_id\` PRIMARY KEY(\`id\`)
-    )`,
-    // ── user_blocks ──────────────────────────────────────────────────
-    `CREATE TABLE IF NOT EXISTS \`user_blocks\` (
-      \`id\` int AUTO_INCREMENT NOT NULL,
-      \`userId\` int NOT NULL,
-      \`blockedUserId\` int NOT NULL,
-      \`createdAt\` timestamp NOT NULL DEFAULT (now()),
-      CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
-    )`,
-  ];
-
+  const statements = getBootstrapStatements();
   let conn: mysql.Connection | null = null;
+  const startedAt = Date.now();
+  let applied = 0;
+  let skipped = 0;
   try {
     conn = await mysql.createConnection(process.env.DATABASE_URL);
-
-    // 1) Check which columns already exist on `users` (portable, works on all MySQL versions)
-    const [rows] = await conn.query(
-      `SELECT COLUMN_NAME AS name FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`,
-    );
-    const existing = new Set(
-      Array.isArray(rows) ? (rows as any[]).map((r) => String(r?.name ?? r?.NAME ?? "")) : [],
-    );
-
-    // 2) Add any missing column via plain ALTER TABLE (no IF NOT EXISTS needed)
-    for (const col of alterUserCols) {
-      if (existing.has(col.name)) continue;
-      try {
-        await conn.query(`ALTER TABLE \`users\` ADD COLUMN \`${col.name}\` ${col.def}`);
-        console.log(`[Database] ensureSchema: added users.${col.name}`);
-      } catch (err: any) {
-        const msg = String(err?.message || err?.sqlMessage || err);
-        if (/Duplicate column|already exists|ER_DUP_FIELDNAME/i.test(msg)) continue;
-        console.warn(`[Database] ensureSchema ALTER users add ${col.name} failed:`, msg);
-      }
-    }
-
-    // 3) Create missing tables with IF NOT EXISTS (works on MySQL 5.6+)
-    for (const stmt of createTables) {
+    for (const stmt of statements) {
       try {
         await conn.query(stmt);
+        applied++;
       } catch (err: any) {
         const msg = String(err?.message || err?.sqlMessage || err);
-        if (/already exists|ER_TABLE_EXISTS_ERROR/i.test(msg)) continue;
-        console.warn(`[Database] ensureSchema CREATE TABLE failed:`, msg);
+        if (
+          /Duplicate column|Duplicate key|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR|ER_DUP_KEYNAME/i.test(
+            msg,
+          )
+        ) {
+          skipped++;
+          continue;
+        }
+        // Log but keep going — we don't want one bad migration to block auth.
+        console.warn(
+          `[Database] ensureSchema stmt failed (continuing): ${msg} :: ${stmt.slice(0, 120)}...`,
+        );
       }
     }
+    console.log(
+      `[Database] ensureSchema done — applied=${applied} skipped=${skipped} total=${statements.length} in ${Date.now() - startedAt}ms`,
+    );
   } finally {
     if (conn) {
       try {

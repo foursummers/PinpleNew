@@ -11,7 +11,7 @@
     "dev": "cross-env NODE_ENV=development tsx watch server/_core/index.ts",
     "build": "npm run build:client && npm run build:api",
     "build:client": "vite build",
-    "build:api": "esbuild server/vercel-handler.ts --bundle --platform=node --format=esm --target=node20 --packages=external --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" --outfile=api/index.js",
+    "build:api": "esbuild server/vercel-handler.ts --bundle --platform=node --format=esm --target=node20 --packages=external --loader:.sql=text --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" --outfile=api/index.js",
     "start": "cross-env NODE_ENV=production node dist/index.js",
     "check": "tsc --noEmit",
     "test": "vitest run",
