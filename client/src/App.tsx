@@ -24,6 +24,34 @@ const trpc = createTRPCProxyClient<any>({
   ],
 });
 
+// When any protected tRPC call returns UNAUTHORIZED (or a 401), the session
+// cookie is either missing, expired, or produced under a different JWT_SECRET.
+// Rather than leaving the user staring at a broken screen, hard-reload the
+// page so AuthScreen takes over.
+function isAuthError(err: unknown): boolean {
+  const e = err as { data?: { httpStatus?: number; code?: string }; message?: string };
+  const status = e?.data?.httpStatus;
+  const code = e?.data?.code;
+  const msg = e?.message ?? "";
+  return (
+    status === 401 ||
+    code === "UNAUTHORIZED" ||
+    /Please login|Invalid session|10001/i.test(msg)
+  );
+}
+
+function handleAuthErrorOnce() {
+  if (typeof window === "undefined") return;
+  if ((window as any).__pinpleAuthRedirecting) return;
+  (window as any).__pinpleAuthRedirecting = true;
+  // Clear any client-side flag and bounce to root — AuthScreen will render
+  // because auth.me will return null after the bad cookie is ignored.
+  try {
+    window.history.replaceState({}, "", "/");
+  } catch {}
+  window.location.reload();
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 type User = { id: number; name: string | null; email: string | null; avatarUrl: string | null; openId: string };
 type Family = { id: number; name: string; inviteCode: string; memberRole?: string };
@@ -1208,7 +1236,21 @@ function FamilySelector({ user, onSelect }: { user: User; onSelect: (f: Family) 
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    (trpc as any).family.myFamilies.query().then((r: Family[]) => { setFamilies(r); setLoading(false); });
+    (trpc as any).family.myFamilies
+      .query()
+      .then((r: Family[]) => {
+        setFamilies(r);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        setLoading(false);
+        if (isAuthError(err)) {
+          handleAuthErrorOnce();
+          return;
+        }
+        const msg = (err as { message?: string })?.message ?? "加载家庭失败，请刷新重试";
+        setError(msg);
+      });
   }, []);
 
   const createFamily = async () => {
@@ -2058,7 +2100,56 @@ const NAV_ITEMS = [
   { id: "profile", icon: "👤", label: "我的" },
 ];
 
-export default function App() {
+// ─── Error Boundary ───────────────────────────────────────────────────────────
+// Without this, any uncaught render error produces a totally blank page —
+// which is exactly the white screen the user hit.
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("[AppErrorBoundary]", error, info);
+    if (isAuthError(error)) {
+      handleAuthErrorOnce();
+    }
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="aura-boot">
+          <style>{CSS}</style>
+          <div className="aura-boot-inner">
+            <div className="aura-boot-badge">PINPLE · FAULT</div>
+            <div className="aura-boot-mark">pin<span>ple</span></div>
+            <div className="aura-boot-status" style={{ maxWidth: 420, textAlign: "center" }}>
+              应用加载出了点小问题。点下方按钮刷新页面重试。
+            </div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "rgba(255,255,255,0.4)", maxWidth: 420, textAlign: "center", wordBreak: "break-word" }}>
+              {this.state.error.message || String(this.state.error)}
+            </div>
+            <button
+              className="auth-submit"
+              style={{ marginTop: 8, padding: "10px 28px", background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff", borderRadius: 999, fontFamily: "'Space Grotesk', sans-serif", cursor: "pointer" }}
+              onClick={() => window.location.reload()}
+            >
+              刷新重试
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function AppInner() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [family, setFamily] = useState<Family | null>(null);
   const [children, setChildren] = useState<Child[]>([]);
@@ -2231,5 +2322,27 @@ export default function App() {
         </div>
       </div>
     </>
+  );
+}
+
+export default function App() {
+  // Top-level error boundary + global unhandled rejection interception.
+  // Any 401 that escapes a component (even from a forgotten .catch) now
+  // triggers an automatic logout+reload instead of a white screen.
+  useEffect(() => {
+    const onRejection = (ev: PromiseRejectionEvent) => {
+      if (isAuthError(ev.reason)) {
+        ev.preventDefault();
+        handleAuthErrorOnce();
+      }
+    };
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => window.removeEventListener("unhandledrejection", onRejection);
+  }, []);
+
+  return (
+    <AppErrorBoundary>
+      <AppInner />
+    </AppErrorBoundary>
   );
 }
