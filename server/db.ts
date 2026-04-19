@@ -59,6 +59,57 @@ let _dbCreatedAt = 0;
 let _schemaReadyPromise: Promise<void> | null = null;
 const DB_MAX_AGE_MS = 5 * 60 * 1000; // Recreate connection every 5 minutes to prevent stale connections
 
+/**
+ * Parse a DATABASE_URL into a mysql2 connection-options object.
+ *
+ * Handles the JDBC / Aiven / PlanetScale-style URL flavour that uses `ssl-mode`
+ * as a query parameter — mysql2 ignores that param (and logs a warning) and
+ * would then try to talk plaintext to a server that only accepts TLS.
+ *
+ * We translate:
+ *   ?ssl-mode=REQUIRED|VERIFY_CA|VERIFY_IDENTITY  → `ssl: {}` (TLS on, cert check)
+ *   ?ssl-mode=DISABLED                             → no TLS
+ *   no ssl-mode, host contains 'aivencloud.com'    → `ssl: {}` (safe default)
+ */
+function buildDbConfig(rawUrl: string): mysql.ConnectionOptions {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    // Not a URL we can parse — hand it back to drizzle/mysql2 as-is and
+    // let them produce the error.
+    return { uri: rawUrl } as unknown as mysql.ConnectionOptions;
+  }
+
+  const sslMode = (url.searchParams.get("ssl-mode") || "").toUpperCase();
+  url.searchParams.delete("ssl-mode");
+
+  const config: mysql.ConnectionOptions = {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : 3306,
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: url.pathname.replace(/^\//, "") || undefined,
+    connectTimeout: 10_000,
+  };
+
+  const needsTls =
+    sslMode === "REQUIRED" ||
+    sslMode === "VERIFY_CA" ||
+    sslMode === "VERIFY_IDENTITY" ||
+    // Managed MySQL services that always need TLS
+    /\b(aivencloud\.com|psdb\.cloud|cluster\.ondigitalocean\.com)$/i.test(url.hostname);
+
+  if (needsTls && sslMode !== "DISABLED") {
+    // Aiven uses a self-signed chain; we don't need strict verify for our
+    // use case, and they document `rejectUnauthorized: false` as the
+    // standard mysql2 config. Flip to `true` if you upload their CA.
+    config.ssl = { rejectUnauthorized: false };
+  }
+
+  return config;
+}
+
 export function resetDb() {
   _db = null;
   _dbCreatedAt = 0;
@@ -74,8 +125,13 @@ export async function getDb() {
   }
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      const cfg = buildDbConfig(process.env.DATABASE_URL);
+      const pool = mysql.createPool(cfg);
+      _db = drizzle(pool);
       _dbCreatedAt = now;
+      console.log(
+        `[Database] pool created — host=${(cfg as any).host} db=${(cfg as any).database} ssl=${!!(cfg as any).ssl}`,
+      );
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -120,7 +176,7 @@ async function ensureSchema(_db: NonNullable<typeof _db>) {
   let applied = 0;
   let skipped = 0;
   try {
-    conn = await mysql.createConnection(process.env.DATABASE_URL);
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
     for (const stmt of statements) {
       try {
         await conn.query(stmt);

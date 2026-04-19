@@ -15,6 +15,8 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { createContext } from "./_core/context";
 import { registerOAuthRoutes } from "./_core/oauth";
 import { appRouter } from "./routers";
+import { getDb } from "./db";
+import { sql } from "drizzle-orm";
 
 const app = express();
 
@@ -31,6 +33,42 @@ app.get("/api/health", (_req: Request, res: Response) => {
     hasOAuth: Boolean(process.env.OAUTH_SERVER_URL),
     hasResend: Boolean(process.env.RESEND_API_KEY),
   });
+});
+
+// Diagnostic endpoint — actually tries to run `SELECT 1` against the DB.
+// Helpful for checking credentials / SSL without going through the whole
+// register flow. Does NOT reveal the password; just reports the error.
+app.get("/api/db-ping", async (_req: Request, res: Response) => {
+  const started = Date.now();
+  try {
+    const db = await getDb();
+    if (!db) {
+      res.status(500).json({
+        ok: false,
+        stage: "getDb",
+        message: "DATABASE_URL not set or pool creation failed.",
+        elapsedMs: Date.now() - started,
+      });
+      return;
+    }
+    const result = await db.execute(sql`SELECT 1 AS ok`);
+    res.json({
+      ok: true,
+      elapsedMs: Date.now() - started,
+      result: Array.isArray(result) ? result[0] : result,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      stage: "query",
+      code: err?.code,
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      // Do NOT include the connection string — it has credentials
+      message: String(err?.sqlMessage || err?.message || err),
+      elapsedMs: Date.now() - started,
+    });
+  }
 });
 
 registerOAuthRoutes(app);

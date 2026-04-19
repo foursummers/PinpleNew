@@ -101,7 +101,7 @@ var init_young_firestar = __esm({
 var password_resets_default;
 var init_password_resets = __esm({
   "drizzle/0011_password_resets.sql"() {
-    password_resets_default = "CREATE TABLE IF NOT EXISTS `password_reset_tokens` (\r\n  `id` int AUTO_INCREMENT NOT NULL,\r\n  `userId` int NOT NULL,\r\n  `token` varchar(128) NOT NULL,\r\n  `expiresAt` timestamp NOT NULL,\r\n  `usedAt` timestamp NULL,\r\n  `createdAt` timestamp NOT NULL DEFAULT (now()),\r\n  CONSTRAINT `password_reset_tokens_id` PRIMARY KEY(`id`),\r\n  CONSTRAINT `password_reset_tokens_token_unique` UNIQUE(`token`)\r\n);\r\n";
+    password_resets_default = "CREATE TABLE IF NOT EXISTS `password_reset_tokens` (\n  `id` int AUTO_INCREMENT NOT NULL,\n  `userId` int NOT NULL,\n  `token` varchar(128) NOT NULL,\n  `expiresAt` timestamp NOT NULL,\n  `usedAt` timestamp NULL,\n  `createdAt` timestamp NOT NULL DEFAULT (now()),\n  CONSTRAINT `password_reset_tokens_id` PRIMARY KEY(`id`),\n  CONSTRAINT `password_reset_tokens_token_unique` UNIQUE(`token`)\n);\n";
   }
 });
 
@@ -749,6 +749,30 @@ import { and, desc, eq, gte, inArray, lt, lte, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
+function buildDbConfig(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return { uri: rawUrl };
+  }
+  const sslMode = (url.searchParams.get("ssl-mode") || "").toUpperCase();
+  url.searchParams.delete("ssl-mode");
+  const config = {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : 3306,
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: url.pathname.replace(/^\//, "") || void 0,
+    connectTimeout: 1e4
+  };
+  const needsTls = sslMode === "REQUIRED" || sslMode === "VERIFY_CA" || sslMode === "VERIFY_IDENTITY" || // Managed MySQL services that always need TLS
+  /\b(aivencloud\.com|psdb\.cloud|cluster\.ondigitalocean\.com)$/i.test(url.hostname);
+  if (needsTls && sslMode !== "DISABLED") {
+    config.ssl = { rejectUnauthorized: false };
+  }
+  return config;
+}
 function resetDb() {
   _db = null;
   _dbCreatedAt = 0;
@@ -762,8 +786,13 @@ async function getDb() {
   }
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      const cfg = buildDbConfig(process.env.DATABASE_URL);
+      const pool = mysql.createPool(cfg);
+      _db = drizzle(pool);
       _dbCreatedAt = now;
+      console.log(
+        `[Database] pool created \u2014 host=${cfg.host} db=${cfg.database} ssl=${!!cfg.ssl}`
+      );
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -795,7 +824,7 @@ async function ensureSchema(_db2) {
   let applied = 0;
   let skipped = 0;
   try {
-    conn = await mysql.createConnection(process.env.DATABASE_URL);
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
     for (const stmt of statements) {
       try {
         await conn.query(stmt);
@@ -3537,6 +3566,8 @@ var appRouter = router({
 });
 
 // server/vercel-handler.ts
+init_db();
+import { sql as sql2 } from "drizzle-orm";
 var app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -3550,6 +3581,38 @@ app.get("/api/health", (_req, res) => {
     hasOAuth: Boolean(process.env.OAUTH_SERVER_URL),
     hasResend: Boolean(process.env.RESEND_API_KEY)
   });
+});
+app.get("/api/db-ping", async (_req, res) => {
+  const started = Date.now();
+  try {
+    const db = await getDb();
+    if (!db) {
+      res.status(500).json({
+        ok: false,
+        stage: "getDb",
+        message: "DATABASE_URL not set or pool creation failed.",
+        elapsedMs: Date.now() - started
+      });
+      return;
+    }
+    const result = await db.execute(sql2`SELECT 1 AS ok`);
+    res.json({
+      ok: true,
+      elapsedMs: Date.now() - started,
+      result: Array.isArray(result) ? result[0] : result
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      stage: "query",
+      code: err?.code,
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      // Do NOT include the connection string — it has credentials
+      message: String(err?.sqlMessage || err?.message || err),
+      elapsedMs: Date.now() - started
+    });
+  }
 });
 registerOAuthRoutes(app);
 app.use(
