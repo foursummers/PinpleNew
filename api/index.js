@@ -3584,22 +3584,69 @@ app.get("/api/health", (_req, res) => {
 });
 app.get("/api/db-ping", async (_req, res) => {
   const started = Date.now();
-  try {
-    const db = await getDb();
-    if (!db) {
-      res.status(500).json({
-        ok: false,
-        stage: "getDb",
-        message: "DATABASE_URL not set or pool creation failed.",
-        elapsedMs: Date.now() - started
-      });
+  const diag = {
+    hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+    databaseUrlLength: process.env.DATABASE_URL?.length ?? 0
+  };
+  if (process.env.DATABASE_URL) {
+    try {
+      const u = new URL(process.env.DATABASE_URL);
+      diag.parsedUrl = {
+        protocol: u.protocol,
+        host: u.hostname,
+        port: u.port,
+        database: u.pathname.replace(/^\//, ""),
+        user: u.username,
+        hasPassword: Boolean(u.password),
+        passwordLength: u.password.length,
+        sslMode: u.searchParams.get("ssl-mode")
+      };
+    } catch (err) {
+      diag.parseError = String(err?.message || err);
+      res.status(500).json({ ok: false, stage: "parseUrl", elapsedMs: Date.now() - started, ...diag });
       return;
     }
+  } else {
+    res.status(500).json({
+      ok: false,
+      stage: "env",
+      message: "DATABASE_URL not set. Check Vercel \u2192 Settings \u2192 Environment Variables \u2192 make sure it's assigned to Production AND redeploy.",
+      elapsedMs: Date.now() - started,
+      ...diag
+    });
+    return;
+  }
+  let db;
+  try {
+    db = await getDb();
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      stage: "getDb",
+      message: String(err?.message || err),
+      code: err?.code,
+      elapsedMs: Date.now() - started,
+      ...diag
+    });
+    return;
+  }
+  if (!db) {
+    res.status(500).json({
+      ok: false,
+      stage: "getDb",
+      message: "drizzle returned null \u2014 pool creation failed internally. Check Vercel logs for '[Database] Failed to connect' line.",
+      elapsedMs: Date.now() - started,
+      ...diag
+    });
+    return;
+  }
+  try {
     const result = await db.execute(sql2`SELECT 1 AS ok`);
     res.json({
       ok: true,
       elapsedMs: Date.now() - started,
-      result: Array.isArray(result) ? result[0] : result
+      result: Array.isArray(result) ? result[0] : result,
+      ...diag
     });
   } catch (err) {
     res.status(500).json({
@@ -3608,9 +3655,9 @@ app.get("/api/db-ping", async (_req, res) => {
       code: err?.code,
       errno: err?.errno,
       sqlState: err?.sqlState,
-      // Do NOT include the connection string — it has credentials
       message: String(err?.sqlMessage || err?.message || err),
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
+      ...diag
     });
   }
 });
