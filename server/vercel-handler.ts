@@ -15,8 +15,10 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { createContext } from "./_core/context";
 import { registerOAuthRoutes } from "./_core/oauth";
 import { appRouter } from "./routers";
-import { getDb } from "./db";
+import { getDb, buildDbConfig } from "./db";
 import { sql } from "drizzle-orm";
+import mysql from "mysql2/promise";
+import { getBootstrapStatements } from "./_core/bootstrap-sql";
 
 const app = express();
 
@@ -136,6 +138,115 @@ app.get("/api/db-ping", async (_req: Request, res: Response) => {
       elapsedMs: Date.now() - started,
       ...diag,
     });
+  }
+});
+
+// Diagnostic: list actual columns on `users` so we can see whether the
+// self-healing ALTER TABLE steps actually applied on this DB.
+app.get("/api/db-columns", async (_req: Request, res: Response) => {
+  if (!process.env.DATABASE_URL) {
+    res.status(500).json({ ok: false, message: "DATABASE_URL not set" });
+    return;
+  }
+  let conn: mysql.Connection | null = null;
+  try {
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    const [rows] = await conn.query(
+      "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT " +
+        "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' " +
+        "ORDER BY ORDINAL_POSITION",
+    );
+    const [tables] = await conn.query(
+      "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME",
+    );
+    res.json({ ok: true, usersColumns: rows, tables });
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      code: err?.code,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+    });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+});
+
+// Diagnostic: force-run every bootstrap/ALTER statement against the DB and
+// report which ones applied vs. failed. Protected by DB_REPAIR_SECRET so
+// random visitors can't hit it. If DB_REPAIR_SECRET is unset, allow anyway
+// (caller deliberately exposed it for recovery).
+app.get("/api/db-repair", async (req: Request, res: Response) => {
+  const required = process.env.DB_REPAIR_SECRET;
+  const given = (req.query.secret as string) || req.headers["x-repair-secret"];
+  if (required && given !== required) {
+    res.status(401).json({ ok: false, message: "Unauthorized" });
+    return;
+  }
+  if (!process.env.DATABASE_URL) {
+    res.status(500).json({ ok: false, message: "DATABASE_URL not set" });
+    return;
+  }
+  const statements = getBootstrapStatements();
+  const results: Array<{
+    preview: string;
+    status: "applied" | "skipped" | "failed";
+    message?: string;
+    code?: string;
+  }> = [];
+  let applied = 0;
+  let skipped = 0;
+  let failed = 0;
+  let conn: mysql.Connection | null = null;
+  try {
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    for (const stmt of statements) {
+      const preview = stmt.replace(/\s+/g, " ").slice(0, 120);
+      try {
+        await conn.query(stmt);
+        applied++;
+        results.push({ preview, status: "applied" });
+      } catch (err: any) {
+        const msg = String(err?.sqlMessage || err?.message || err);
+        if (
+          /Duplicate column|Duplicate key|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR|ER_DUP_KEYNAME/i.test(
+            msg,
+          )
+        ) {
+          skipped++;
+          results.push({ preview, status: "skipped", message: msg, code: err?.code });
+        } else {
+          failed++;
+          results.push({ preview, status: "failed", message: msg, code: err?.code });
+        }
+      }
+    }
+    res.json({ ok: failed === 0, applied, skipped, failed, total: statements.length, results });
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      code: err?.code,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+      applied,
+      skipped,
+      failed,
+      results,
+    });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 });
 

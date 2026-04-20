@@ -634,6 +634,7 @@ __export(db_exports, {
   addFamilyMember: () => addFamilyMember,
   addTaskCheckinWithValue: () => addTaskCheckinWithValue,
   blockUser: () => blockUser,
+  buildDbConfig: () => buildDbConfig,
   checkExistingConnection: () => checkExistingConnection,
   checkExistingJoinRequest: () => checkExistingJoinRequest,
   clearConnectionUpdate: () => clearConnectionUpdate,
@@ -3574,7 +3575,9 @@ var appRouter = router({
 
 // server/vercel-handler.ts
 init_db();
+init_bootstrap_sql();
 import { sql as sql2 } from "drizzle-orm";
+import mysql2 from "mysql2/promise";
 var app = express();
 app.set("trust proxy", true);
 app.use(express.json({ limit: "50mb" }));
@@ -3676,6 +3679,96 @@ app.get("/api/db-ping", async (_req, res) => {
       elapsedMs: Date.now() - started,
       ...diag
     });
+  }
+});
+app.get("/api/db-columns", async (_req, res) => {
+  if (!process.env.DATABASE_URL) {
+    res.status(500).json({ ok: false, message: "DATABASE_URL not set" });
+    return;
+  }
+  let conn = null;
+  try {
+    conn = await mysql2.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    const [rows] = await conn.query(
+      "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' ORDER BY ORDINAL_POSITION"
+    );
+    const [tables] = await conn.query(
+      "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
+    );
+    res.json({ ok: true, usersColumns: rows, tables });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      code: err?.code,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err)
+    });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+      }
+    }
+  }
+});
+app.get("/api/db-repair", async (req, res) => {
+  const required = process.env.DB_REPAIR_SECRET;
+  const given = req.query.secret || req.headers["x-repair-secret"];
+  if (required && given !== required) {
+    res.status(401).json({ ok: false, message: "Unauthorized" });
+    return;
+  }
+  if (!process.env.DATABASE_URL) {
+    res.status(500).json({ ok: false, message: "DATABASE_URL not set" });
+    return;
+  }
+  const statements = getBootstrapStatements();
+  const results = [];
+  let applied = 0;
+  let skipped = 0;
+  let failed = 0;
+  let conn = null;
+  try {
+    conn = await mysql2.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    for (const stmt of statements) {
+      const preview = stmt.replace(/\s+/g, " ").slice(0, 120);
+      try {
+        await conn.query(stmt);
+        applied++;
+        results.push({ preview, status: "applied" });
+      } catch (err) {
+        const msg = String(err?.sqlMessage || err?.message || err);
+        if (/Duplicate column|Duplicate key|already exists|ER_DUP_FIELDNAME|ER_TABLE_EXISTS_ERROR|ER_DUP_KEYNAME/i.test(
+          msg
+        )) {
+          skipped++;
+          results.push({ preview, status: "skipped", message: msg, code: err?.code });
+        } else {
+          failed++;
+          results.push({ preview, status: "failed", message: msg, code: err?.code });
+        }
+      }
+    }
+    res.json({ ok: failed === 0, applied, skipped, failed, total: statements.length, results });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      code: err?.code,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+      applied,
+      skipped,
+      failed,
+      results
+    });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+      }
+    }
   }
 });
 registerOAuthRoutes(app);

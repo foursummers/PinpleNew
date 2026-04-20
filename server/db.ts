@@ -71,7 +71,7 @@ const DB_MAX_AGE_MS = 5 * 60 * 1000; // Recreate connection every 5 minutes to p
  *   ?ssl-mode=DISABLED                             → no TLS
  *   no ssl-mode, host contains 'aivencloud.com'    → `ssl: {}` (safe default)
  */
-function buildDbConfig(rawUrl: string): mysql.ConnectionOptions {
+export function buildDbConfig(rawUrl: string): mysql.ConnectionOptions {
   let url: URL;
   try {
     url = new URL(rawUrl);
