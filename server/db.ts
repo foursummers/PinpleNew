@@ -416,54 +416,12 @@ export async function getFamilyMembers(familyId: number) {
   const db = await getDb();
   if (!db) return [];
   const members = await db.select().from(familyMembers).where(eq(familyMembers.familyId, familyId));
-  const result: any[] = [];
+  const result = [];
   for (const m of members) {
     const user = await getUserById(m.userId);
-    if (!user) continue;
-    // Flatten so the v4.3 frontend can read user fields directly off the row
-    // while still keeping the full `user` object for any callers that need it.
-    const birthdayIso = m.birthDate ? new Date(m.birthDate).toISOString().slice(0, 10) : null;
-    result.push({
-      ...m,
-      user,
-      name: user.name ?? null,
-      email: user.email ?? null,
-      openId: user.openId,
-      avatarUrl: user.avatarUrl ?? null,
-      relation: (m as any).relation ?? null,
-      remark: (m as any).remark ?? null,
-      birthday: birthdayIso,
-    });
+    if (user) result.push({ ...m, user });
   }
   return result;
-}
-
-// v4.3: unified write for relation / remark / birthday / role from the
-// "家庭成员管理" UI. Pass `undefined` to leave a field unchanged, `null` to clear.
-export async function updateFamilyMemberInfo(
-  familyId: number,
-  userId: number,
-  data: {
-    relation?: string | null;
-    remark?: string | null;
-    birthday?: string | null;
-    role?: "admin" | "collaborator" | "observer";
-  }
-) {
-  const db = await getDb();
-  if (!db) return;
-  const set: Record<string, unknown> = {};
-  if (data.relation !== undefined) set.relation = data.relation;
-  if (data.remark !== undefined) set.remark = data.remark;
-  if (data.role !== undefined) set.role = data.role;
-  if (data.birthday !== undefined) {
-    set.birthDate = data.birthday ? new Date(data.birthday) : null;
-  }
-  if (Object.keys(set).length === 0) return;
-  await db
-    .update(familyMembers)
-    .set(set)
-    .where(and(eq(familyMembers.familyId, familyId), eq(familyMembers.userId, userId)));
 }
 
 export async function getMemberRole(familyId: number, userId: number): Promise<FamilyMember | undefined> {

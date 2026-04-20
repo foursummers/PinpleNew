@@ -134,10 +134,6 @@ CREATE TABLE \`user_blocks\` (
   \`createdAt\` timestamp NOT NULL DEFAULT (now()),
   CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
 );
---> statement-breakpoint
-ALTER TABLE \`family_members\` ADD COLUMN \`relation\` varchar(50);
---> statement-breakpoint
-ALTER TABLE \`family_members\` ADD COLUMN \`remark\` varchar(255);
 `;
 
 export const ALL_BOOTSTRAP_SQL: string = [
