@@ -1,22 +1,27 @@
 /**
- * Pinple — 拼朋友
- * Full-stack React frontend connecting to tRPC backend
- * Design: Warm editorial — organic textures, confident typography, generous space
+ * 拼朋友 Pinpengyou — v4.3
+ * 白天/夜间双主题 · 简化建档 · 人脉圈搜索加好友 · 家庭成员管理 · 修复弹窗高度
+ *
+ * Vercel-hardening additions on top of the v4.3 template:
+ *   - tRPC client uses credentials:"include" so the session cookie travels
+ *   - <AppErrorBoundary> + global unhandledrejection listener catch the
+ *     "Please login (10001)" 401 spiral that otherwise white-screens the app
+ *   - Forgot-password / reset-password flow (uses the existing email backend)
  */
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, Component, type ErrorInfo, type ReactNode } from "react";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
+import type { AppRouter } from "../../server/routers";
 
-// ─── tRPC Client ──────────────────────────────────────────────────────────────
-// credentials: "include" ensures the session cookie is sent on every request,
-// even if the browser has unusual defaults or the frontend is later hosted on
-// a different subdomain than /api.
-const trpc = createTRPCProxyClient<any>({
+const api = createTRPCProxyClient<AppRouter>({
   links: [
     httpBatchLink({
       url: "/api/trpc",
       transformer: superjson,
+      // Vercel terminates TLS at the edge. Without credentials:"include" the
+      // browser will *omit* our session cookie on cross-origin-style fetches
+      // and every protected procedure 401s. Don't remove this without a fix.
       fetch(input, init) {
         return fetch(input, { ...init, credentials: "include" });
       },
@@ -24,2420 +29,1163 @@ const trpc = createTRPCProxyClient<any>({
   ],
 });
 
-// When any protected tRPC call returns UNAUTHORIZED (or a 401), the session
-// cookie is either missing, expired, or produced under a different JWT_SECRET.
-// Rather than leaving the user staring at a broken screen, hard-reload the
-// page so AuthScreen takes over.
+// ─── Auth-error guard ─────────────────────────────────────────────────────────
+// The backend throws TRPCError({ code: "UNAUTHORIZED", message: "Please login" })
+// once the session cookie is missing/invalid. We detect that anywhere it bubbles
+// up (caught or not) and force a clean reload back to the auth screen — but
+// only ONCE per page load, otherwise we'd loop forever.
 function isAuthError(err: unknown): boolean {
-  const e = err as { data?: { httpStatus?: number; code?: string }; message?: string };
-  const status = e?.data?.httpStatus;
-  const code = e?.data?.code;
-  const msg = e?.message ?? "";
-  return (
-    status === 401 ||
-    code === "UNAUTHORIZED" ||
-    /Please login|Invalid session|10001/i.test(msg)
-  );
+  const msg = (err as any)?.message ?? "";
+  if (typeof msg !== "string") return false;
+  return /Please login|UNAUTHORIZED|10001|未登录/i.test(msg);
 }
 
+let _authErrorHandled = false;
 function handleAuthErrorOnce() {
-  if (typeof window === "undefined") return;
-  if ((window as any).__pinpleAuthRedirecting) return;
-  (window as any).__pinpleAuthRedirecting = true;
-  // Clear any client-side flag and bounce to root — AuthScreen will render
-  // because auth.me will return null after the bad cookie is ignored.
-  try {
-    window.history.replaceState({}, "", "/");
-  } catch {}
-  window.location.reload();
+  if (_authErrorHandled) return;
+  _authErrorHandled = true;
+  // Clear any cached state and bounce to login. We don't try to call
+  // auth.logout because the cookie is already invalid by definition.
+  try { localStorage.removeItem("ppy_lastFam"); } catch {}
+  // Use replace so the Back button doesn't take the user into a bad state.
+  setTimeout(() => { window.location.replace("/"); }, 50);
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type User = { id: number; name: string | null; email: string | null; avatarUrl: string | null; openId: string };
-type Family = { id: number; name: string; inviteCode: string; memberRole?: string };
+type User = { id:number; name:string|null; email:string|null; avatarUrl:string|null; openId:string; role?:string; creditScore?:number|null };
+type Family = { id:number; name:string; inviteCode:string; memberRole?:string };
 type Child = {
-  id: number; familyId: number; nickname: string; fullName?: string;
-  gender?: string; birthDate?: string; isMultiple?: boolean;
-  childOneName?: string; childTwoName?: string;
-  pregnancyRefDate?: string; pregnancyWeeksAtRef?: number;
-  embryoTransferDate?: string; embryoDay?: number;
-  ageInfo?: { years: number; months: number; totalMonths: number };
-  eddInfo?: { lmp: Date; edd: Date; twin37w: Date };
-  notes?: string;
+  id:number; familyId:number; nickname:string;
+  gender?:string|null; birthDate?:string|null; notes?:string|null;
+  pregnancyRefDate?:string|null; pregnancyWeeksAtRef?:number|null; pregnancyDaysAtRef?:number|null;
+  ageInfo?:{years:number;months:number;days:number;totalMonths:number}|null;
+  eddInfo?:{lmp:string;edd:string;twin37w:string}|null;
+  isMultiple?:boolean|null;
+  embryoTransferDate?:string|null; embryoDay?:number|null;
+  childOneName?:string|null; childTwoName?:string|null;
+  childOneGender?:string|null; childTwoGender?:string|null;
 };
-type TimelineEvent = {
-  id: number; childId: number; type: string; title: string;
-  content?: string; eventDate: string; isPublic: boolean; createdAt: string;
-};
-type RoutineTask = {
-  id: number; title: string; category: string; icon?: string;
-  color?: string; todayCheckins: number; taskType?: string;
-};
-
-// ─── Utils ────────────────────────────────────────────────────────────────────
-const fmt = (d: string | Date | undefined) => {
-  if (!d) return "";
-  return new Date(d).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+type Task = { id:number; title:string; category:string; icon?:string|null; color?:string|null; todayCheckins:number; isActive?:boolean|null };
+type Skill = { id:number; userId:number; name:string; category?:string|null; description?:string|null; priceMin?:string|null; priceMax?:string|null; location?:string|null; status?:string|null };
+type HelpReq = { id:number; title:string; description?:string|null; location?:string|null; urgency?:string|null; status?:string|null };
+type Friend = { id:number; name:string|null; email:string|null; openId:string; creditScore?:number|null; status?:string };
+type FamilyMember = {
+  id:number; userId:number; name?:string|null; email?:string|null;
+  role:string; relation?:string|null; remark?:string|null;
+  birthday?:string|null; openId:string;
 };
 
-const fmtFull = (d: string | Date | undefined) => {
-  if (!d) return "";
-  return new Date(d).toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
-};
+// ─── Theme ────────────────────────────────────────────────────────────────────
+type Theme = "light"|"dark";
+function useTheme():[Theme,(t:Theme)=>void]{
+  const [t,setT]=useState<Theme>(()=>{
+    try { return (localStorage.getItem("ppyTheme")||"light") as Theme; } catch { return "light"; }
+  });
+  const set=(v:Theme)=>{setT(v);try{localStorage.setItem("ppyTheme",v);}catch{}};
+  useEffect(()=>{document.documentElement.setAttribute("data-theme",t);},[t]);
+  return [t,set];
+}
 
-function calcCurrentPregnancyWeeks(child: Child): { weeks: number; days: number } | null {
-  if (child.pregnancyRefDate && child.pregnancyWeeksAtRef !== undefined) {
-    const ref = new Date(child.pregnancyRefDate);
-    const now = new Date();
-    const diffDays = Math.floor((now.getTime() - ref.getTime()) / 86400000);
-    const totalDays = (child.pregnancyWeeksAtRef * 7) + diffDays;
-    return { weeks: Math.floor(totalDays / 7), days: totalDays % 7 };
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function calcWeeks(c:Child):{weeks:number;days:number}|null{
+  if(c.pregnancyRefDate&&c.pregnancyWeeksAtRef!=null){
+    const ref=new Date(c.pregnancyRefDate);
+    const diff=Math.floor((Date.now()-ref.getTime())/86400000);
+    const total=c.pregnancyWeeksAtRef*7+(c.pregnancyDaysAtRef??0)+diff;
+    return {weeks:Math.floor(total/7),days:total%7};
   }
-  if (child.embryoTransferDate) {
-    const transfer = new Date(child.embryoTransferDate);
-    const embryoDay = child.embryoDay ?? 5;
-    const daysBack = embryoDay + 14;
-    const lmpDate = new Date(transfer.getTime() - daysBack * 86400000);
-    const now = new Date();
-    const totalDays = Math.floor((now.getTime() - lmpDate.getTime()) / 86400000);
-    return { weeks: Math.floor(totalDays / 7), days: totalDays % 7 };
+  if(c.embryoTransferDate){
+    const t2=new Date(c.embryoTransferDate);
+    const lmp=new Date(t2.getTime()-((c.embryoDay??5)+14)*86400000);
+    const total=Math.floor((Date.now()-lmp.getTime())/86400000);
+    return {weeks:Math.floor(total/7),days:total%7};
   }
   return null;
 }
+function daysTo(d?:string|null):number|null{
+  if(!d) return null;
+  return Math.ceil((new Date(d).getTime()-Date.now())/86400000);
+}
+function fmt(d?:string|null,opts?:Intl.DateTimeFormatOptions):string{
+  if(!d) return "";
+  return new Date(d).toLocaleDateString("zh-CN",opts??{month:"short",day:"numeric"});
+}
+const AC=["#3D7A5A","#B87A1A","#4A6EA8","#8B5A9A","#B84050","#2E7A7A","#D4693A","#447AA0"];
+function aColor(s:string){return AC[Math.abs(s.charCodeAt(0)+(s.charCodeAt(s.length-1)||0))%AC.length];}
+function ini(name?:string|null,email?:string|null){return (name||email||"?").slice(0,2).toUpperCase();}
 
-function daysUntil(d: string | Date | undefined): number | null {
-  if (!d) return null;
-  const diff = new Date(d).getTime() - Date.now();
-  return Math.ceil(diff / 86400000);
+// Read URL query param without depending on a router
+function getQuery(name:string):string|null{
+  try { return new URLSearchParams(window.location.search).get(name); } catch { return null; }
 }
 
-const PREGNANCY_TIMELINE = [
-  { week: "8周", title: "一超", desc: "确认孕囊" },
-  { week: "11-13周", title: "NT检查", desc: "早唐筛查" },
-  { week: "15-20周", title: "无创DNA", desc: "染色体筛查" },
-  { week: "22-24周", title: "大排畸", desc: "四维超声" },
-  { week: "24-28周", title: "糖耐量", desc: "GDM筛查" },
-  { week: "32-34周", title: "胎位+监护", desc: "每周产检" },
-  { week: "37周", title: "预计分娩", desc: "剖宫产" },
+// ─── Static data ──────────────────────────────────────────────────────────────
+const TL_NODES=[
+  {week:"6-8周",title:"建档产检",desc:"确认妊娠，建立档案",s:"done"},
+  {week:"11-13周",title:"NT检查",desc:"早唐筛查，颈部透明层",s:"upcoming"},
+  {week:"15-20周",title:"无创DNA",desc:"染色体筛查（可选）",s:"upcoming"},
+  {week:"22-24周",title:"大排畸",desc:"四维超声，系统筛查",s:"upcoming"},
+  {week:"24-28周",title:"糖耐量",desc:"GDM筛查",s:"upcoming"},
+  {week:"32-34周",title:"胎位+监护",desc:"每2周产检",s:"upcoming"},
+  {week:"37-40周",title:"足月分娩",desc:"顺产或剖宫产",s:"target"},
+] as const;
+
+const ITEMS=[
+  {cat:"喂养",icon:"🍼",items:["奶瓶（宽口）×4","奶嘴S/M号×6","奶瓶消毒器×1","温奶器×1","吸奶器（电动）×1","储奶袋×1盒","配方奶粉（备用）×1罐"]},
+  {cat:"衣物",icon:"👕",items:["和尚服/连体衣×8件","包被/抱被×2条","帽子×2顶","袜子×4双","口水巾×8条","隔尿垫×8条"]},
+  {cat:"洗护",icon:"🛁",items:["婴儿浴盆×1","浴巾×2条","小毛巾×6条","婴儿沐浴露×1","护臀膏×1支","婴儿棉签×1盒"]},
+  {cat:"睡眠",icon:"🛏️",items:["婴儿床×1张","床垫×1个","床单×3条","睡袋（薄款）×2个"]},
+  {cat:"出行",icon:"🚗",items:["安全提篮×1个","婴儿推车×1辆","妈咪包×1个"]},
+  {cat:"医护",icon:"💊",items:["耳温枪×1个","吸鼻器×1个","肚脐贴×1盒","碘伏棉签×1盒","维生素D×1瓶"]},
+  {cat:"产妇",icon:"👩",items:["哺乳内衣×3件","一次性内裤×10条","产妇卫生巾×2包","防溢乳垫×1盒","哺乳睡衣×2套","收腹带×1条"]},
 ];
 
-const ITEM_CHECKLIST = [
-  { cat: "🍼 喂养", items: ["奶瓶（宽口）×6", "奶嘴SS/S号×8", "奶瓶消毒器", "温奶器", "吸奶器（电动双边）", "储奶袋×2盒"] },
-  { cat: "👕 衣物", items: ["和尚服/连体衣×14件", "包被×4", "帽子×4", "袜子×8双", "口水巾×12条"] },
-  { cat: "🛁 洗护", items: ["婴儿浴盆×2", "浴巾×4", "小毛巾×10条", "护臀膏×2", "婴儿沐浴露"] },
-  { cat: "🛏️ 睡眠", items: ["婴儿床×2", "床垫×2", "床单×6条", "睡袋（薄款）×4"] },
-  { cat: "🚗 出行", items: ["安全提篮×2", "双胞胎推车×1", "妈咪包×1"] },
-  { cat: "💊 医护", items: ["耳温枪×2", "吸鼻器×2", "肚脐贴×2盒", "维生素D×1"] },
-  { cat: "👩 产妇", items: ["哺乳内衣×4-6件", "一次性内裤×20条", "产妇卫生巾×3包", "防溢乳垫×2盒", "收腹带×1"] },
-];
-
-const EMERGENCY_DATA = [
-  { type: "🤰 孕期", level: "critical" as const, symptom: "阴道流血", action: "立即急诊" },
-  { type: "🤰 孕期", level: "critical" as const, symptom: "剧烈腹痛", action: "立即急诊" },
-  { type: "🤰 孕期", level: "critical" as const, symptom: "破水", action: "平躺垫高臀部，急诊" },
-  { type: "🤰 孕期", level: "warning" as const, symptom: "持续头痛+眼花", action: "急诊（子痫前期）" },
-  { type: "🤰 孕期", level: "warning" as const, symptom: "胎动明显减少", action: "立即就医" },
-  { type: "🌸 产后", level: "critical" as const, symptom: "产后大出血", action: "按压子宫，通知医护" },
-  { type: "🌸 产后", level: "warning" as const, symptom: "发烧>38.5℃", action: "就医（乳腺炎？感染？）" },
-  { type: "🌸 产后", level: "warning" as const, symptom: "情绪低落超2周", action: "心理咨询（产后抑郁）" },
-  { type: "👶 新生儿", level: "critical" as const, symptom: "体温>37.5℃", action: "立即就医" },
-  { type: "👶 新生儿", level: "warning" as const, symptom: "黄疸严重", action: "就医，可能需蓝光" },
-  { type: "👶 新生儿", level: "warning" as const, symptom: "拒奶/嗜睡", action: "观察，持续则就医" },
-];
-
-const CONTACTS = [
-  { role: "南山医院急诊", phone: "0755-26553111", note: "24小时", urgent: true },
-  { role: "深圳市妇幼急诊", phone: "0755-82889999", note: "24小时", urgent: true },
-  { role: "产检医生", phone: "待填写", note: "南山医院", urgent: false },
-  { role: "月嫂A（空空）", phone: "待填写", note: "负责空空", urgent: false },
-  { role: "月嫂B（多多）", phone: "待填写", note: "负责多多", urgent: false },
-  { role: "通乳师", phone: "待填写", note: "母乳指导", urgent: false },
-];
+const EM=[
+  {t:"孕期",l:"crit",s:"阴道流血",a:"立即急诊"},
+  {t:"孕期",l:"crit",s:"剧烈腹痛",a:"立即急诊"},
+  {t:"孕期",l:"crit",s:"破水",a:"平躺垫高臀部，即刻急诊"},
+  {t:"孕期",l:"warn",s:"持续头痛+眼花",a:"急诊（子痫前期排查）"},
+  {t:"孕期",l:"warn",s:"胎动明显减少",a:"立即就医"},
+  {t:"产后",l:"crit",s:"产后大出血",a:"通知医护，按压子宫"},
+  {t:"产后",l:"warn",s:"发烧 > 38.5℃",a:"就医检查"},
+  {t:"产后",l:"warn",s:"情绪低落超2周",a:"心理咨询（产后抑郁排查）"},
+  {t:"新生儿",l:"crit",s:"体温 > 37.5℃",a:"立即就医"},
+  {t:"新生儿",l:"warn",s:"黄疸较重",a:"就医，可能需蓝光照射"},
+  {t:"新生儿",l:"warn",s:"拒奶/持续嗜睡",a:"观察，持续则就医"},
+] as const;
 
 // ─── CSS ──────────────────────────────────────────────────────────────────────
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+const CSS=`
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-:root {
-  /* ── AURA dark palette ── */
-  --c-bg: #05070C;
-  --c-bg-raised: #0A0E18;
-  --c-surface: #0E1320;
-  --c-surface2: #161C2D;
-  --c-glass: rgba(255,255,255,0.04);
-  --c-glass-strong: rgba(255,255,255,0.08);
-  --c-border: rgba(255,255,255,0.08);
-  --c-border2: rgba(255,255,255,0.14);
-  --c-ink: #E8ECF5;
-  --c-ink2: rgba(232,236,245,0.62);
-  --c-ink3: rgba(232,236,245,0.38);
-  --c-accent: #4A88FF;
-  --c-accent-soft: #6DA1FF;
-  --c-accent-light: rgba(74,136,255,0.14);
-  --c-accent2: #E6A554;
-  --c-accent2-light: rgba(230,165,84,0.14);
-  --c-rose: #FF5A6A;
-  --c-rose-light: rgba(255,90,106,0.14);
-  --c-amber: #E6A554;
-  --c-amber-light: rgba(230,165,84,0.14);
-  --c-ok: #5FD9A0;
-  --c-ok-light: rgba(95,217,160,0.14);
-  --ff-display: 'Space Grotesk', 'Instrument Serif', system-ui, sans-serif;
-  --ff-body: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
-  --ff-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
-  --r: 14px; --r-lg: 20px; --r-xl: 28px;
-  --shadow: 0 10px 30px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.35);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
-  --aura-glow: radial-gradient(900px 520px at 12% -10%, rgba(74,136,255,0.14), transparent 60%),
-               radial-gradient(620px 360px at 108% 20%, rgba(74,136,255,0.08), transparent 55%),
-               radial-gradient(520px 300px at 50% 120%, rgba(230,165,84,0.06), transparent 60%);
+:root{
+  --sage:#3D7A5A;--sage-d:#2C5A42;--sage-lt:rgba(61,122,90,.1);--sage-mid:rgba(61,122,90,.28);
+  --amber:#C4861A;--amber-lt:rgba(196,134,26,.1);--amber-mid:rgba(196,134,26,.32);
+  --rose:#C03050;--rose-lt:rgba(192,48,80,.1);--rose-mid:rgba(192,48,80,.28);
+  --ff-s:'Noto Serif SC',Georgia,serif;--ff:'DM Sans',system-ui,sans-serif;
+  --r:10px;--rl:16px;--rxl:22px;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --tr:background-color .25s var(--ease),color .25s var(--ease),border-color .25s var(--ease);
 }
 
-html { scroll-behavior: smooth; }
-body {
-  background: var(--c-bg);
-  background-image: var(--aura-glow);
-  background-attachment: fixed;
-  color: var(--c-ink);
-  font-family: var(--ff-body);
-  font-size: 15px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-  letter-spacing: 0.005em;
-}
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
-  background-size: 4px 4px;
-  opacity: 0.4;
-  mix-blend-mode: screen;
-}
-#root { position: relative; z-index: 1; }
-
-/* ── Layout ── */
-.app-shell { display: flex; min-height: 100vh; }
-.sidebar { width: 240px; flex-shrink: 0; background: var(--c-surface); border-right: 1px solid var(--c-border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
-.main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.topbar { background: var(--c-surface); border-bottom: 1px solid var(--c-border); padding: 0 28px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
-.page-body { flex: 1; padding: 32px 32px 80px; max-width: 960px; }
-
-/* ── Sidebar ── */
-.sidebar-logo { padding: 24px 20px 16px; }
-.logo-mark { font-family: var(--ff-display); font-size: 22px; font-weight: 700; color: var(--c-ink); letter-spacing: -0.5px; }
-.logo-mark span { color: var(--c-accent); }
-.logo-sub { font-size: 11px; color: var(--c-ink3); margin-top: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
-.sidebar-family { margin: 0 12px 8px; }
-.family-pill { background: var(--c-accent-light); border: 1px solid rgba(74,136,255,0.32); border-radius: var(--r); padding: 10px 12px; cursor: pointer; transition: all 0.15s; }
-.family-pill:hover { background: rgba(74,136,255,0.22); border-color: rgba(74,136,255,0.48); }
-.family-pill-name { font-size: 13px; font-weight: 600; color: var(--c-accent); }
-.family-pill-code { font-size: 11px; color: var(--c-ink3); margin-top: 1px; }
-.sidebar-nav { flex: 1; padding: 4px 12px; }
-.nav-section { margin-bottom: 20px; }
-.nav-section-label { font-size: 10px; font-weight: 600; color: var(--c-ink3); letter-spacing: 1px; text-transform: uppercase; padding: 0 8px; margin-bottom: 4px; }
-.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: var(--r); cursor: pointer; transition: all 0.12s; color: var(--c-ink2); font-size: 14px; font-weight: 400; border: none; background: transparent; width: 100%; text-align: left; }
-.nav-item:hover { background: var(--c-surface2); color: var(--c-ink); }
-.nav-item.active { background: var(--c-accent-light); color: var(--c-accent); font-weight: 500; }
-.nav-item .nav-icon { font-size: 16px; width: 20px; text-align: center; flex-shrink: 0; }
-.nav-badge { margin-left: auto; background: var(--c-accent); color: white; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 10px; }
-.sidebar-bottom { padding: 16px 12px; border-top: 1px solid var(--c-border); }
-.user-chip { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r); cursor: pointer; }
-.user-chip:hover { background: var(--c-surface2); }
-.avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; flex-shrink: 0; }
-.user-info { flex: 1; min-width: 0; }
-.user-name { font-size: 13px; font-weight: 500; color: var(--c-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.user-email { font-size: 11px; color: var(--c-ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* ── Mobile ── */
-.mobile-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(14,19,32,0.82); backdrop-filter: blur(18px) saturate(180%); -webkit-backdrop-filter: blur(18px) saturate(180%); border-top: 1px solid var(--c-border); z-index: 200; padding: 6px 0 env(safe-area-inset-bottom, 0); }
-.mobile-nav-items { display: flex; justify-content: space-around; }
-.mobile-nav-btn { flex: 1; background: transparent; border: none; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; cursor: pointer; color: var(--c-ink3); font-family: var(--ff-body); transition: color 0.12s; }
-.mobile-nav-btn.active { color: var(--c-accent); }
-.mobile-nav-btn .mn-icon { font-size: 20px; line-height: 1; }
-.mobile-nav-btn span { font-size: 10px; font-weight: 500; }
-.topbar-hamburger { display: none; background: transparent; border: none; cursor: pointer; padding: 4px; color: var(--c-ink2); }
-.mobile-sidebar { display: none; position: fixed; inset: 0; z-index: 300; }
-.mobile-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.3); }
-.mobile-drawer { position: absolute; left: 0; top: 0; bottom: 0; width: 260px; background: var(--c-surface); box-shadow: 4px 0 20px rgba(0,0,0,0.15); display: flex; flex-direction: column; overflow-y: auto; }
-
-@media (max-width: 768px) {
-  .sidebar { display: none; }
-  .mobile-nav { display: block; }
-  .topbar-hamburger { display: flex; }
-  .page-body { padding: 20px 16px 100px; }
-  .topbar { padding: 0 16px; }
-  .mobile-sidebar.open { display: block; }
+[data-theme="light"]{
+  --bg:#EEECEA;--s:#FFFFFF;--s2:#F5F4F1;--s3:#ECEAE7;--s4:#E2E0DC;
+  --ink:#1C1A17;--ink2:#4E4B46;--ink3:#918E88;
+  --bd:rgba(28,26,23,.08);--bd2:rgba(28,26,23,.15);--bd3:rgba(28,26,23,.05);
+  --sh:0 1px 3px rgba(0,0,0,.05),0 0 1px rgba(0,0,0,.03);
+  --sh-lg:0 8px 28px rgba(0,0,0,.10),0 2px 6px rgba(0,0,0,.05);
+  --sb-bg:#FFFFFF;--mob-bg:rgba(255,255,255,.92);
+  --hero-from:#3D7A5A;--hero-to:#2C5A42;
 }
 
-/* ── Cards ── */
-.card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-lg); padding: 20px 24px; box-shadow: var(--shadow-sm); }
-.card-sm { padding: 14px 16px; }
-.card + .card { margin-top: 12px; }
-
-/* ── Page header ── */
-.page-header { margin-bottom: 28px; }
-.page-title { font-family: var(--ff-display); font-size: 26px; font-weight: 700; color: var(--c-ink); letter-spacing: -0.5px; line-height: 1.2; }
-.page-subtitle { font-size: 14px; color: var(--c-ink3); margin-top: 4px; }
-
-/* ── Hero card (family dashboard) ── */
-.hero-card { background: linear-gradient(135deg, #1A2540 0%, #0E1628 55%, #0A1020 100%); color: #EAF0FF; border: 1px solid rgba(74,136,255,0.24); border-radius: var(--r-xl); padding: 28px 32px; margin-bottom: 24px; position: relative; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06); }
-.hero-card::before { content: ''; position: absolute; top: -80px; right: -80px; width: 260px; height: 260px; background: radial-gradient(circle, rgba(74,136,255,0.45), transparent 70%); border-radius: 50%; filter: blur(12px); }
-.hero-card::after { content: ''; position: absolute; bottom: -40px; left: 40px; width: 140px; height: 140px; background: radial-gradient(circle, rgba(230,165,84,0.22), transparent 70%); border-radius: 50%; filter: blur(8px); }
-.hero-title { font-family: var(--ff-display); font-size: 22px; font-weight: 700; margin-bottom: 4px; }
-.hero-sub { font-size: 13px; opacity: 0.8; }
-.hero-stats { display: flex; gap: 20px; margin-top: 20px; }
-.hero-stat { }
-.hero-stat-val { font-family: var(--ff-display); font-size: 28px; font-weight: 700; line-height: 1; }
-.hero-stat-label { font-size: 11px; opacity: 0.75; margin-top: 2px; }
-
-/* ── Stats grid ── */
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
-.stat-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); padding: 16px 18px; }
-.stat-label { font-size: 12px; color: var(--c-ink3); font-weight: 500; letter-spacing: 0.3px; }
-.stat-value { font-family: var(--ff-display); font-size: 24px; font-weight: 700; color: var(--c-ink); margin-top: 4px; line-height: 1; }
-.stat-value.accent { color: var(--c-accent); }
-.stat-value.amber { color: var(--c-accent2); }
-.stat-note { font-size: 11px; color: var(--c-ink3); margin-top: 3px; }
-
-/* ── Timeline ── */
-.timeline { position: relative; }
-.timeline::before { content: ''; position: absolute; left: 16px; top: 8px; bottom: 8px; width: 2px; background: var(--c-border2); border-radius: 1px; }
-.tl-item { position: relative; padding-left: 44px; margin-bottom: 16px; }
-.tl-dot { position: absolute; left: 8px; top: 14px; width: 18px; height: 18px; border-radius: 50%; background: var(--c-surface); border: 2px solid var(--c-border2); display: flex; align-items: center; justify-content: center; font-size: 8px; z-index: 1; }
-.tl-dot.done { background: var(--c-accent); border-color: var(--c-accent); color: white; }
-.tl-dot.current { background: var(--c-accent2); border-color: var(--c-accent2); color: white; animation: pulse 2s infinite; }
-.tl-dot.target { background: var(--c-rose); border-color: var(--c-rose); color: white; }
-@keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(196,115,42,0.3)} 50%{box-shadow:0 0 0 6px rgba(196,115,42,0)} }
-.tl-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); padding: 14px 16px; border-left: 3px solid transparent; }
-.tl-card.done { border-left-color: var(--c-accent); }
-.tl-card.current { border-left-color: var(--c-accent2); }
-.tl-card.target { border-left-color: var(--c-rose); }
-.tl-card-row { display: flex; justify-content: space-between; align-items: center; }
-.tl-title { font-size: 14px; font-weight: 600; color: var(--c-ink); }
-.tl-week { font-size: 11px; color: var(--c-ink3); }
-.tl-desc { font-size: 13px; color: var(--c-ink2); margin-top: 3px; }
-.tl-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
-.tl-date { font-size: 11px; color: var(--c-ink3); }
-.tl-tag { font-size: 11px; background: var(--c-surface2); color: var(--c-ink2); padding: 2px 8px; border-radius: 6px; }
-
-/* ── Items checklist ── */
-.checklist-cat { margin-bottom: 12px; }
-.checklist-cat-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; cursor: pointer; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); }
-.checklist-cat-header:hover { background: var(--c-surface2); }
-.checklist-cat-title { font-size: 14px; font-weight: 600; color: var(--c-ink); }
-.checklist-cat-prog { font-size: 12px; color: var(--c-ink3); }
-.checklist-items { background: var(--c-surface); border: 1px solid var(--c-border); border-top: none; border-radius: 0 0 var(--r) var(--r); overflow: hidden; }
-.checklist-item { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--c-border); cursor: pointer; transition: background 0.1s; }
-.checklist-item:last-child { border-bottom: none; }
-.checklist-item:hover { background: var(--c-surface2); }
-.check-box { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--c-border2); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.15s; }
-.check-box.checked { background: var(--c-accent); border-color: var(--c-accent); color: white; }
-.checklist-item-name { flex: 1; font-size: 13px; color: var(--c-ink); transition: all 0.15s; }
-.checklist-item-name.done { color: var(--c-ink3); text-decoration: line-through; }
-.progress-bar { height: 4px; background: var(--c-surface2); border-radius: 2px; overflow: hidden; margin-bottom: 16px; }
-.progress-fill { height: 100%; background: var(--c-accent); border-radius: 2px; transition: width 0.4s ease; }
-
-/* ── Emergency ── */
-.em-section { margin-bottom: 20px; }
-.em-section-title { font-size: 12px; font-weight: 600; color: var(--c-ink3); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
-.em-card { display: flex; gap: 12px; padding: 12px 14px; border-radius: var(--r); margin-bottom: 8px; }
-.em-card.critical { background: var(--c-rose-light); border: 1px solid rgba(255,90,106,0.28); }
-.em-card.warning { background: var(--c-amber-light); border: 1px solid rgba(230,165,84,0.28); }
-.em-symptom { font-size: 14px; font-weight: 600; }
-.em-card.critical .em-symptom { color: var(--c-rose); }
-.em-card.warning .em-symptom { color: var(--c-amber); }
-.em-action { font-size: 12px; margin-top: 2px; color: var(--c-ink2); }
-.em-icon { font-size: 18px; flex-shrink: 0; }
-
-/* ── Contacts ── */
-.contact-card { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; }
-.contact-card + .contact-card { border-top: 1px solid var(--c-border); }
-.contact-urgent { background: var(--c-rose-light); }
-.contact-name { font-size: 14px; font-weight: 500; }
-.contact-urgent .contact-name { color: var(--c-rose); }
-.contact-note { font-size: 12px; color: var(--c-ink3); margin-top: 1px; }
-.contact-phone { font-size: 14px; font-weight: 600; }
-.contact-urgent .contact-phone { color: var(--c-rose); }
-
-/* ── Team ── */
-.team-card { display: flex; gap: 14px; align-items: center; padding: 16px; }
-.team-card + .team-card { border-top: 1px solid var(--c-border); }
-.team-avatar-circle { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: white; flex-shrink: 0; }
-.team-info { flex: 1; }
-.team-role { font-size: 14px; font-weight: 600; color: var(--c-ink); }
-.team-time { font-size: 11px; color: var(--c-ink3); }
-.team-duty { font-size: 13px; color: var(--c-ink2); margin-top: 2px; }
-
-/* ── Auth ── */
-.auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--c-bg); padding: 20px; }
-.auth-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-xl); padding: 40px; width: 100%; max-width: 420px; box-shadow: var(--shadow); }
-.auth-logo { text-align: center; margin-bottom: 32px; }
-.auth-logo-mark { font-family: var(--ff-display); font-size: 32px; font-weight: 700; }
-.auth-logo-mark span { color: var(--c-accent); }
-.auth-tabs { display: flex; background: var(--c-surface2); border-radius: var(--r); padding: 4px; margin-bottom: 24px; }
-.auth-tab { flex: 1; border: none; background: transparent; padding: 9px; border-radius: 8px; font-family: var(--ff-body); font-size: 14px; font-weight: 500; color: var(--c-ink3); cursor: pointer; transition: all 0.15s; }
-.auth-tab.active { background: var(--c-surface); color: var(--c-ink); box-shadow: var(--shadow-sm); }
-.field { margin-bottom: 16px; }
-.field label { display: block; font-size: 13px; font-weight: 500; color: var(--c-ink2); margin-bottom: 6px; }
-.field input { width: 100%; padding: 11px 14px; border: 1.5px solid var(--c-border2); border-radius: var(--r); font-family: var(--ff-body); font-size: 15px; background: var(--c-surface); color: var(--c-ink); outline: none; transition: border-color 0.15s; }
-.field input:focus { border-color: var(--c-accent); }
-.btn-primary { width: 100%; padding: 13px; background: linear-gradient(135deg, var(--c-accent) 0%, var(--c-accent-soft) 100%); color: white; border: none; border-radius: var(--r); font-family: var(--ff-body); font-size: 15px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; transition: all 0.18s; margin-top: 4px; box-shadow: 0 8px 24px rgba(74,136,255,0.28); }
-.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(74,136,255,0.38); }
-.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
-.btn-outline { padding: 9px 18px; background: var(--c-glass); color: var(--c-ink); border: 1px solid var(--c-border2); border-radius: var(--r); font-family: var(--ff-body); font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
-.btn-outline:hover { background: var(--c-glass-strong); border-color: rgba(74,136,255,0.42); color: var(--c-accent-soft); }
-.btn-sm { padding: 7px 14px; font-size: 13px; border-radius: 8px; }
-.alert { padding: 11px 14px; border-radius: var(--r); font-size: 13px; margin-bottom: 12px; }
-.alert-error { background: var(--c-rose-light); color: var(--c-rose); border: 1px solid rgba(255,90,106,0.28); }
-.alert-success { background: var(--c-ok-light); color: var(--c-ok); border: 1px solid rgba(95,217,160,0.28); }
-.divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; font-size: 12px; color: var(--c-ink3); }
-.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--c-border2); }
-
-/* ── AURA Auth Screen Overrides (scoped to .auth-screen) ── */
-.auth-screen {
-  position: relative;
-  min-height: 100vh;
-  background: #030407;
-  color: #FFFFFF;
-  font-family: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
-  overflow: hidden;
-  padding: 24px;
-}
-.auth-screen::before {
-  content: '';
-  position: absolute;
-  inset: -10%;
-  background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
-    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
-  filter: blur(20px);
-  animation: auraSweep 14s ease-in-out infinite alternate;
-  pointer-events: none;
-  z-index: 0;
-}
-.auth-screen::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
-  background-size: 3px 3px;
-  opacity: 0.55;
-  mix-blend-mode: screen;
-  pointer-events: none;
-  z-index: 1;
-}
-@keyframes auraSweep {
-  0%   { transform: translate3d(-3%, -2%, 0) scale(1); }
-  100% { transform: translate3d(3%, 2%, 0) scale(1.06); }
+[data-theme="dark"]{
+  --bg:#0F100F;--s:#1A1C19;--s2:#212320;--s3:#272927;--s4:#2E302D;
+  --ink:#EAE8E2;--ink2:#A09C96;--ink3:#5A5854;
+  --bd:rgba(255,255,255,.07);--bd2:rgba(255,255,255,.13);--bd3:rgba(255,255,255,.04);
+  --sh:0 1px 3px rgba(0,0,0,.35),0 0 1px rgba(0,0,0,.2);
+  --sh-lg:0 8px 32px rgba(0,0,0,.45),0 2px 6px rgba(0,0,0,.25);
+  --sb-bg:#151614;--mob-bg:rgba(21,22,20,.93);
+  --sage:#5EAA84;--sage-d:#7EC4A0;--sage-lt:rgba(94,170,132,.13);--sage-mid:rgba(94,170,132,.28);
+  --amber:#D4963A;--amber-lt:rgba(212,150,58,.13);--amber-mid:rgba(212,150,58,.32);
+  --rose:#D45870;--rose-lt:rgba(212,88,112,.13);--rose-mid:rgba(212,88,112,.28);
+  --hero-from:#1E3D2C;--hero-to:#162C20;
 }
 
-.auth-tech-label {
-  position: absolute;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 10px;
-  letter-spacing: 0.22em;
-  color: rgba(255,255,255,0.32);
-  text-transform: uppercase;
-  z-index: 2;
-  pointer-events: none;
-}
-.auth-tech-label.tl { top: 28px; left: 28px; }
-.auth-tech-label.bl { bottom: 28px; left: 28px; }
-.auth-tech-label.tr { top: 28px; right: 28px; }
-.auth-tech-label.br { bottom: 28px; right: 28px; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--ff);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;transition:var(--tr)}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:2px}
 
-.auth-screen .auth-card {
-  position: relative;
-  z-index: 3;
-  width: 100%;
-  max-width: 460px;
-  margin: 0 auto;
-  background: rgba(255,255,255,0.035);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 40px;
-  padding: 44px 40px;
-  display: flex;
-  flex-direction: column;
-  gap: 26px;
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 40px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08);
-}
+/* shell */
+.app{display:flex;min-height:100vh}
+.sb{width:232px;flex-shrink:0;background:var(--sb-bg);border-right:1px solid var(--bd);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto;transition:var(--tr)}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{background:var(--s);border-bottom:1px solid var(--bd);padding:0 24px;height:52px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:90;flex-shrink:0;transition:var(--tr)}
+.page-body{padding:26px 26px 100px;flex:1;overflow-y:auto}
+.pi{max-width:860px}
 
-.auth-screen .auth-logo { text-align: left; margin-bottom: 0; }
-.auth-screen .auth-logo-mark {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 34px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  color: #fff;
-}
-.auth-screen .auth-logo-mark span { color: rgba(255,255,255,0.55); font-weight: 300; }
+/* sidebar */
+.sb-logo{padding:20px 16px 12px}
+.logo{font-family:var(--ff-s);font-size:20px;font-weight:700;color:var(--ink);letter-spacing:-.5px}
+.logo em{color:var(--sage);font-style:normal}
+.logo-sub{font-size:10px;color:var(--ink3);margin-top:2px;letter-spacing:.5px}
+.sb-fam{margin:0 10px 10px;background:var(--sage-lt);border:1px solid var(--sage-mid);border-radius:12px;padding:10px 12px;cursor:pointer;transition:all .15s}
+.sb-fam:hover{filter:brightness(.96)}
+.sb-fn{font-size:12.5px;font-weight:600;color:var(--sage)}
+.sb-fc{font-size:9.5px;color:var(--ink3);margin-top:2px;font-family:monospace;letter-spacing:.1em}
+.sb-nav{flex:1;padding:0 8px 8px}
+.sb-sec{font-size:9.5px;font-weight:600;color:var(--ink3);letter-spacing:.9px;text-transform:uppercase;padding:0 8px;margin:14px 0 4px}
+.nb{display:flex;align-items:center;gap:9px;padding:8px 10px;width:100%;background:transparent;border:none;border-radius:10px;font-family:var(--ff);font-size:13px;color:var(--ink2);cursor:pointer;text-align:left;transition:all .12s;margin-bottom:2px}
+.nb:hover{background:var(--s3);color:var(--ink)}
+.nb.on{background:var(--sage-lt);color:var(--sage);font-weight:500}
+.nb-ic{font-size:14px;width:20px;text-align:center;flex-shrink:0}
+.sb-bot{padding:10px 10px 14px;border-top:1px solid var(--bd)}
 
-.auth-system-badge {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: rgba(255,255,255,0.85);
-  background: rgba(255,255,255,0.08);
-  padding: 5px 12px;
-  border-radius: 999px;
-  align-self: flex-start;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.auth-title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 32px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  line-height: 1.15;
-  color: #fff;
-  margin-top: 10px;
-}
-.auth-subtitle {
-  color: rgba(255,255,255,0.5);
-  font-size: 14px;
-  font-weight: 400;
-  margin-top: 6px;
+/* avatar */
+.av{border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex-shrink:0;font-family:var(--ff-s)}
+.av-sm{width:28px;height:28px;font-size:10px}
+.av-md{width:36px;height:36px;font-size:13px}
+.av-lg{width:64px;height:64px;font-size:22px}
+
+/* user chip */
+.uc{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;transition:background .12s;margin-top:8px}
+.uc:hover{background:var(--s3)}
+.un{font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ue{font-size:10px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* theme toggle */
+.theme-tog{display:flex;align-items:center;gap:6px;padding:6px 11px;background:var(--s3);border:1px solid var(--bd);border-radius:20px;cursor:pointer;font-size:12px;color:var(--ink2);transition:all .15s;font-family:var(--ff);width:100%}
+.theme-tog:hover{background:var(--s4)}
+
+/* mobile nav */
+.mob-nav{display:none;position:fixed;bottom:0;left:0;right:0;background:var(--mob-bg);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid var(--bd);z-index:200;padding:4px 0 env(safe-area-inset-bottom,0)}
+.mob-items{display:flex;justify-content:space-around}
+.mb{flex:1;background:transparent;border:none;padding:5px 2px 4px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;color:var(--ink3);font-family:var(--ff);transition:color .12s}
+.mb.on{color:var(--sage)}
+.mb-ic{font-size:18px;line-height:1}
+.mb-lb{font-size:9px;font-weight:500}
+.ham{display:none;background:transparent;border:none;padding:5px;color:var(--ink2);cursor:pointer}
+.drw{display:none;position:fixed;inset:0;z-index:300}
+.drw.open{display:block}
+.drw-bg{position:absolute;inset:0;background:rgba(0,0,0,.35)}
+.drw-panel{position:absolute;left:0;top:0;bottom:0;width:248px;background:var(--sb-bg);display:flex;flex-direction:column;overflow-y:auto;box-shadow:4px 0 24px rgba(0,0,0,.2);transition:var(--tr)}
+@media(max-width:768px){
+  .sb{display:none}.mob-nav{display:block}.ham{display:flex;align-items:center}
+  .page-body{padding:18px 16px 88px}.topbar{padding:0 14px}.tb-title{display:none}
 }
 
-.auth-screen .auth-tabs {
-  display: flex;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 999px;
-  padding: 4px;
-  margin-bottom: 0;
-  gap: 4px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-}
-.auth-screen .auth-tab {
-  color: rgba(255,255,255,0.55);
-  border-radius: 999px;
-  padding: 11px 16px;
-  font-family: inherit;
-  font-weight: 500;
-  font-size: 13px;
-  letter-spacing: 0.04em;
-  transition: all .25s cubic-bezier(.16,1,.3,1);
-}
-.auth-screen .auth-tab:hover { color: rgba(255,255,255,0.85); }
-.auth-screen .auth-tab.active {
-  background: #FFFFFF;
-  color: #030407;
-  font-weight: 600;
-  box-shadow: 0 0 24px rgba(255,255,255,0.22);
-}
+/* page */
+.pg-head{margin-bottom:22px}
+.pg-t{font-family:var(--ff-s);font-size:23px;font-weight:700;letter-spacing:-.4px;line-height:1.2}
+.pg-s{font-size:13px;color:var(--ink3);margin-top:3px}
+.rb{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+.re{display:flex;align-items:center;gap:8px}
 
-.auth-sso-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
-}
-.auth-btn-sso {
-  height: 56px;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  font-family: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  transition: all .2s ease;
-  text-decoration: none;
-}
-.auth-btn-sso:hover {
-  background: rgba(255,255,255,0.10);
-  transform: translateY(-2px);
-  border-color: rgba(255,255,255,0.16);
-}
-.auth-btn-sso svg { width: 18px; height: 18px; }
+/* cards */
+.card{background:var(--s);border:1px solid var(--bd);border-radius:var(--rl);padding:20px 22px;box-shadow:var(--sh);transition:var(--tr)}
+.card-p0{padding:0;overflow:hidden}
 
-.auth-screen .divider {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin: 0;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: rgba(255,255,255,0.3);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-.auth-screen .divider::before,
-.auth-screen .divider::after {
-  content: "";
-  flex: 1;
-  height: 2px;
-  background: rgba(255,255,255,0.08);
-  border-radius: 999px;
-}
+/* hero */
+.hero{border-radius:20px;padding:22px 26px;margin-bottom:16px;position:relative;overflow:hidden;background:linear-gradient(135deg,var(--hero-from) 0%,var(--hero-to) 100%)}
+.hero::before{content:'';position:absolute;top:-40px;right:-40px;width:160px;height:160px;background:rgba(255,255,255,.06);border-radius:50%}
+.hero::after{content:'';position:absolute;bottom:-20px;left:20px;width:90px;height:90px;background:rgba(255,255,255,.04);border-radius:50%}
+.hi{position:relative;z-index:1}
+.ht{font-family:var(--ff-s);font-size:17px;font-weight:700;color:#fff;margin-bottom:2px}
+.hs2{font-size:11.5px;color:rgba(255,255,255,.7)}
+.h-stats{display:flex;gap:18px;margin-top:16px;flex-wrap:wrap}
+.hv{font-family:var(--ff-s);font-size:28px;font-weight:700;color:#fff;line-height:1}
+.hl{font-size:10px;color:rgba(255,255,255,.62);margin-top:2px}
 
-.auth-screen .field { margin-bottom: 0; display: flex; flex-direction: column; gap: 8px; }
-.auth-screen .field label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 500;
-  color: rgba(255,255,255,0.55);
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  padding-left: 20px;
-  margin-bottom: 0;
-}
-.auth-screen .field input {
-  width: 100%;
-  height: 56px;
-  padding: 0 24px;
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  color: #fff;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 15px;
-  transition: background 0.2s, border-color 0.2s;
-  outline: none;
-}
-.auth-screen .field input::placeholder { color: rgba(255,255,255,0.28); }
-.auth-screen .field input:focus {
-  background: rgba(255,255,255,0.10);
-  border-color: rgba(255,255,255,0.18);
-}
+/* invite bar */
+.inv{background:var(--sage-lt);border:1px solid var(--sage-mid);border-radius:var(--r);padding:12px 16px;display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.inv-info{flex:1}
+.inv-lbl{font-size:9.5px;color:var(--sage);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px}
+.inv-code{font-size:20px;font-weight:700;color:var(--ink);letter-spacing:3px;font-family:monospace}
+.inv-sub{font-size:10.5px;color:var(--ink3);margin-top:3px}
+.inv-btns{display:flex;gap:7px;flex-shrink:0}
 
-.auth-screen .btn-primary {
-  width: 100%;
-  height: 64px;
-  padding: 0;
-  margin: 0;
-  border-radius: 999px;
-  background: #FFFFFF;
-  color: #030407;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  border: none;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  box-shadow: 0 0 40px rgba(255,255,255,0.18);
-  transition: all .2s ease;
-}
-.auth-screen .btn-primary:hover:not(:disabled) {
-  background: #E0EDFF;
-  transform: translateY(-2px);
-  box-shadow: 0 0 60px rgba(224,237,255,0.34);
-}
-.auth-screen .btn-primary:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  box-shadow: none;
-}
+/* child cards */
+.cg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.cc{background:var(--s);border:1px solid var(--bd);border-radius:var(--rl);padding:18px 20px;box-shadow:var(--sh);transition:var(--tr)}
+.cc-top{display:flex;align-items:center;gap:11px;margin-bottom:10px}
+.cc-bub{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.cn{font-family:var(--ff-s);font-size:16px;font-weight:700;color:var(--ink)}
+.cg2{font-size:10.5px;color:var(--ink3);margin-top:1px}
+.wr{display:flex;align-items:baseline;gap:4px}
+.wb{font-family:var(--ff-s);font-size:36px;font-weight:700;color:var(--sage);line-height:1}
+.wu{font-size:11.5px;color:var(--ink3)}
+.edd-tag{display:inline-flex;align-items:center;gap:4px;background:var(--amber-lt);border:1px solid var(--amber-mid);color:var(--amber);font-size:10.5px;font-weight:500;padding:3px 9px;border-radius:20px;margin-top:8px}
 
-.auth-screen .btn-outline {
-  width: 100%;
-  height: 56px;
-  padding: 0;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  color: #fff;
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  transition: all .2s ease;
-}
-.auth-screen .btn-outline:hover {
-  background: rgba(255,255,255,0.10);
-  border-color: rgba(255,255,255,0.16);
-  transform: translateY(-2px);
-}
+/* tasks */
+.tg{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.tc{background:var(--s);border:1px solid var(--bd);border-radius:var(--rl);padding:13px 15px;border-top:3px solid var(--sage);position:relative;box-shadow:var(--sh);transition:var(--tr)}
+.tn{font-size:12.5px;font-weight:500;color:var(--ink)}
+.tcat{font-size:10px;color:var(--ink3);margin-top:1px}
+.tv{font-family:var(--ff-s);font-size:32px;font-weight:700;color:var(--ink);margin:6px 0 1px;line-height:1}
+.tl{font-size:9.5px;color:var(--ink3);margin-bottom:10px}
+.tic{position:absolute;top:11px;right:13px;font-size:15px;opacity:.7}
+.btck{width:100%;padding:7px;border:none;border-radius:8px;font-family:var(--ff);font-size:11.5px;font-weight:500;cursor:pointer;color:#fff;transition:opacity .12s,transform .1s}
+.btck:hover{opacity:.88}.btck:active{transform:scale(.97)}.btck:disabled{opacity:.5;cursor:not-allowed}
 
-.auth-screen .alert {
-  padding: 12px 18px;
-  border-radius: 18px;
-  font-size: 13px;
-  margin: 0;
-  font-family: 'Space Grotesk', sans-serif;
-}
-.auth-screen .alert-error {
-  background: rgba(196,80,88,0.14);
-  color: #FFB1B6;
-  border: 1px solid rgba(196,80,88,0.30);
-}
-.auth-screen .alert-success {
-  background: rgba(74,205,160,0.12);
-  color: #9EF5D0;
-  border: 1px solid rgba(74,205,160,0.30);
-}
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:10.5px;font-weight:500;line-height:1.5}
+.p-g{background:var(--sage-lt);color:var(--sage);border:1px solid var(--sage-mid)}
+.p-a{background:var(--amber-lt);color:var(--amber);border:1px solid var(--amber-mid)}
+.p-r{background:var(--rose-lt);color:var(--rose);border:1px solid var(--rose-mid)}
+.p-gr{background:var(--s3);color:var(--ink2);border:1px solid var(--bd2)}
 
-.auth-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: rgba(255,255,255,0.3);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  padding: 0 4px;
-}
+/* section label */
+.sl2{font-size:10px;font-weight:600;color:var(--ink3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
 
-@media (max-width: 540px) {
-  .auth-screen { padding: 16px; }
-  .auth-screen .auth-card { padding: 32px 24px; border-radius: 32px; }
-  .auth-title { font-size: 26px; }
-  .auth-tech-label.tr, .auth-tech-label.br { display: none; }
-}
+/* progress */
+.prog{height:4px;background:var(--s3);border-radius:2px;overflow:hidden}
+.prog-f{height:100%;background:var(--sage);border-radius:2px;transition:width .4s}
 
-/* ── AURA Boot Screen (shares aura bg with auth screen) ── */
-.aura-boot {
-  position: relative;
-  min-height: 100vh;
-  background: #030407;
-  color: #fff;
-  font-family: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-.aura-boot::before {
-  content: '';
-  position: absolute;
-  inset: -10%;
-  background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
-    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
-  filter: blur(20px);
-  animation: auraSweep 14s ease-in-out infinite alternate;
-  pointer-events: none;
-  z-index: 0;
-}
-.aura-boot::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
-  background-size: 3px 3px;
-  opacity: 0.55;
-  mix-blend-mode: screen;
-  pointer-events: none;
-  z-index: 1;
-}
-.aura-boot-inner {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 22px;
-  text-align: center;
-}
-.aura-boot-mark {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 42px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  color: #fff;
-}
-.aura-boot-mark span {
-  color: rgba(255,255,255,0.55);
-  font-weight: 300;
-}
-.aura-boot-badge {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: rgba(255,255,255,0.75);
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.08);
-  padding: 5px 12px;
-  border-radius: 999px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.aura-boot-status {
-  font-size: 14px;
-  color: rgba(255,255,255,0.55);
-  letter-spacing: 0.02em;
-  min-height: 22px;
-}
-.aura-boot-dots {
-  display: inline-flex;
-  gap: 4px;
-  margin-left: 6px;
-  vertical-align: middle;
-}
-.aura-boot-dots span {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.6);
-  animation: auraBootDot 1.2s ease-in-out infinite;
-}
-.aura-boot-dots span:nth-child(2) { animation-delay: 0.15s; }
-.aura-boot-dots span:nth-child(3) { animation-delay: 0.3s; }
-@keyframes auraBootDot {
-  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
-  30%           { opacity: 1;    transform: translateY(-2px); }
-}
-.aura-boot-bar {
-  width: 220px;
-  height: 2px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.08);
-  overflow: hidden;
-  position: relative;
-}
-.aura-boot-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 40%;
-  background: linear-gradient(90deg, transparent, rgba(74,136,255,0.9), transparent);
-  animation: auraBootBar 1.6s ease-in-out infinite;
-}
-@keyframes auraBootBar {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(300%); }
-}
-.aura-boot-footer {
-  position: absolute;
-  bottom: 28px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: rgba(255,255,255,0.3);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  z-index: 2;
-}
+/* buttons */
+.btn{display:flex;align-items:center;justify-content:center;gap:6px;font-family:var(--ff);cursor:pointer;transition:all .14s;border-radius:var(--r)}
+.btn-p{padding:10px 18px;background:var(--sage);color:#fff;border:none;font-size:13px;font-weight:500}
+.btn-p:hover{filter:brightness(1.08)}.btn-p:active{transform:scale(.98)}.btn-p:disabled{opacity:.6;cursor:not-allowed}
+.btn-o{padding:8px 14px;background:transparent;color:var(--sage);border:1.5px solid var(--sage-mid);font-size:12.5px;font-weight:500}
+.btn-o:hover{background:var(--sage-lt)}
+.btn-g{padding:9px 16px;background:transparent;color:var(--ink2);border:1px solid var(--bd2);font-size:13px}
+.btn-g:hover{background:var(--s3)}
+.btn-d{padding:10px 18px;background:transparent;color:var(--rose);border:1.5px solid var(--rose-mid);font-size:13px;font-weight:500;width:100%}
+.btn-d:hover{background:var(--rose-lt)}
+.btn-sm{padding:6px 12px;font-size:11.5px}
+.btn-full{width:100%}
+.btn-copy{background:var(--sage);color:#fff;border:none;padding:6px 13px;border-radius:8px;font-family:var(--ff);font-size:11px;font-weight:500;cursor:pointer;transition:filter .12s;white-space:nowrap}
+.btn-copy:hover{filter:brightness(1.1)}
+.btn-icon{background:var(--s3);border:1px solid var(--bd);color:var(--ink2);padding:5px 10px;border-radius:8px;font-family:var(--ff);font-size:11px;cursor:pointer;transition:all .12s;white-space:nowrap}
+.btn-icon:hover{background:var(--s4)}
+.btn-link{background:none;border:none;color:var(--sage);font-family:var(--ff);font-size:12px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:3px}
+.btn-link:hover{filter:brightness(.9)}
 
-/* ── Tasks ── */
-.task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.task-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r); padding: 16px; position: relative; overflow: hidden; }
-.task-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: var(--r) var(--r) 0 0; }
-.task-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-.task-title { font-size: 14px; font-weight: 600; color: var(--c-ink); }
-.task-count { font-family: var(--ff-display); font-size: 24px; font-weight: 700; color: var(--c-ink); }
-.task-label { font-size: 11px; color: var(--c-ink3); }
-.task-btn { margin-top: 12px; width: 100%; padding: 8px; background: var(--c-surface2); border: none; border-radius: 8px; font-family: var(--ff-body); font-size: 13px; cursor: pointer; font-weight: 500; transition: background 0.12s; }
-.task-btn:hover { background: var(--c-border2); }
+/* forms */
+.field{margin-bottom:13px}
+.field label{display:block;font-size:11.5px;font-weight:500;color:var(--ink2);margin-bottom:5px}
+.field input,.field select,.field textarea{width:100%;padding:9px 12px;border:1.5px solid var(--bd2);border-radius:var(--r);font-family:var(--ff);font-size:13.5px;background:var(--s);color:var(--ink);outline:none;transition:border-color .15s;-webkit-appearance:none}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--sage)}
+.field input::placeholder,.field textarea::placeholder{color:var(--ink3)}
+.field textarea{resize:vertical;min-height:70px}
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field-hint{font-size:10.5px;color:var(--ink3);margin-top:4px;line-height:1.5}
 
-/* ── Family selector (AURA) ── */
-.family-select-screen {
-  position: relative;
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  overflow: hidden;
+/* alerts */
+.alert{padding:9px 13px;border-radius:var(--r);font-size:12.5px;margin-bottom:11px}
+.a-err{background:var(--rose-lt);color:var(--rose);border:1px solid var(--rose-mid)}
+.a-ok{background:var(--sage-lt);color:var(--sage);border:1px solid var(--sage-mid)}
+.div{display:flex;align-items:center;gap:12px;margin:14px 0;font-size:11px;color:var(--ink3)}
+.div::before,.div::after{content:'';flex:1;height:1px;background:var(--bd2)}
+
+/* modal — full-height scroll, safe on mobile */
+.modal{position:fixed;inset:0;z-index:500;display:flex;align-items:flex-end;justify-content:center;padding:0}
+.modal-bg{position:absolute;inset:0;background:rgba(0,0,0,.42)}
+.modal-box{
+  position:relative;background:var(--s);
+  border-radius:var(--rxl) var(--rxl) 0 0;
+  width:100%;max-width:520px;
+  max-height:90vh;
+  display:flex;flex-direction:column;
+  box-shadow:var(--sh-lg);animation:su .22s ease;transition:var(--tr)
 }
-.family-select-screen::before {
-  content: '';
-  position: absolute;
-  inset: -10%;
-  background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 84% 20%, rgba(230,165,84,0.10), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.08), transparent 50%);
-  filter: blur(20px);
-  animation: auraSweep 18s ease-in-out infinite alternate;
-  pointer-events: none;
-  z-index: 0;
-}
-.family-select-screen::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
-  background-size: 3px 3px;
-  opacity: 0.55;
-  mix-blend-mode: screen;
-  pointer-events: none;
-  z-index: 1;
-}
-.family-select-inner {
-  position: relative;
-  z-index: 3;
-  width: 100%;
-  max-width: 500px;
-  background: rgba(255,255,255,0.035);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 32px;
-  padding: 36px 32px;
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 40px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
-}
-.family-select-badge {
-  font-family: var(--ff-mono);
-  font-size: 10px;
-  color: rgba(255,255,255,0.85);
-  background: rgba(255,255,255,0.08);
-  padding: 5px 12px;
-  border-radius: 999px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  display: inline-block;
-  margin-bottom: 18px;
-}
-.family-select-title { font-family: var(--ff-display); font-size: 28px; font-weight: 500; letter-spacing: -0.02em; color: #fff; margin-bottom: 6px; }
-.family-select-sub { font-size: 14px; color: rgba(255,255,255,0.55); margin-bottom: 24px; }
-.family-option {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 18px;
-  padding: 18px 20px;
-  cursor: pointer;
-  margin-bottom: 10px;
-  transition: all 0.2s cubic-bezier(.16,1,.3,1);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.family-option:hover {
-  border-color: rgba(74,136,255,0.5);
-  background: rgba(74,136,255,0.12);
-  transform: translateY(-1px);
-  box-shadow: 0 12px 32px rgba(74,136,255,0.18);
-}
-.family-option-name { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: 0.01em; }
-.family-option-code { font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 3px; font-family: var(--ff-mono); letter-spacing: 0.05em; }
-.family-option-arrow { color: rgba(255,255,255,0.35); font-size: 20px; transition: transform 0.2s ease, color 0.2s ease; }
-.family-option:hover .family-option-arrow { color: var(--c-accent-soft); transform: translateX(4px); }
+.modal-hd{padding:22px 22px 0;flex-shrink:0}
+.modal-body{flex:1;overflow-y:auto;padding:0 22px 4px}
+.modal-ft{padding:16px 22px 28px;flex-shrink:0;display:flex;gap:10px}
+.modal-ft .btn-g,.modal-ft .btn-p{flex:1}
+@keyframes su{from{transform:translateY(40px);opacity:0}to{transform:translateY(0);opacity:1}}
+.mt{font-family:var(--ff-s);font-size:18px;font-weight:700;margin-bottom:16px;color:var(--ink)}
+@media(min-width:540px){.modal{align-items:center;padding:20px}.modal-box{border-radius:var(--rxl);max-height:88vh}}
 
-/* ── Loading ── */
-.spinner { width: 32px; height: 32px; border: 3px solid var(--c-border2); border-top-color: var(--c-accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.loading-center { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 200px; gap: 12px; color: var(--c-ink3); font-size: 14px; }
+/* auth */
+.auth-s{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:20px;transition:var(--tr)}
+.auth-card{background:var(--s);border:1px solid var(--bd);border-radius:var(--rxl);padding:34px 30px 30px;width:100%;max-width:400px;box-shadow:var(--sh-lg);transition:var(--tr)}
+.auth-logo{text-align:center;margin-bottom:24px}
+.auth-brand{font-family:var(--ff-s);font-size:28px;font-weight:700;color:var(--ink);letter-spacing:-.5px}
+.auth-brand em{color:var(--sage);font-style:normal}
+.auth-tag{font-size:12px;color:var(--ink3);margin-top:5px}
+.auth-tabs{display:flex;background:var(--s3);border-radius:var(--r);padding:3px;margin-bottom:18px}
+.atab{flex:1;background:transparent;border:none;padding:8px;border-radius:8px;font-family:var(--ff);font-size:12.5px;font-weight:500;color:var(--ink3);cursor:pointer;transition:all .15s}
+.atab.on{background:var(--s);color:var(--ink);box-shadow:var(--sh)}
+.auth-foot{display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:11.5px;color:var(--ink3)}
 
-/* ── Children grid ── */
-.children-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
-.child-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-lg); padding: 20px; cursor: pointer; transition: all 0.15s; }
-.child-card:hover { box-shadow: var(--shadow); border-color: var(--c-accent); }
-.child-card-top { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
-.child-bubble { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; }
-.child-name { font-family: var(--ff-display); font-size: 18px; font-weight: 700; color: var(--c-ink); }
-.child-gender { font-size: 12px; color: var(--c-ink3); }
-.child-pregnancy { margin-top: 4px; display: flex; align-items: baseline; gap: 6px; }
-.week-big { font-family: var(--ff-display); font-size: 36px; font-weight: 700; color: var(--c-accent); line-height: 1; }
-.week-label { font-size: 13px; color: var(--c-ink3); }
-.child-meta { font-size: 12px; color: var(--c-ink3); margin-top: 8px; }
-.edd-badge { display: inline-flex; align-items: center; gap: 4px; background: var(--c-accent-light); color: var(--c-accent); font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 8px; margin-top: 8px; }
+/* family select */
+.fs{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:20px;transition:var(--tr)}
+.fs-in{width:100%;max-width:450px}
+.fs-t{font-family:var(--ff-s);font-size:25px;font-weight:700;margin-bottom:4px}
+.fs-s{font-size:13px;color:var(--ink3);margin-bottom:20px}
+.fo{background:var(--s);border:1.5px solid var(--bd2);border-radius:var(--rl);padding:14px 16px;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;transition:all .14s;box-shadow:var(--sh)}
+.fo:hover{border-color:var(--sage);background:var(--sage-lt)}
+.fo-n{font-size:15px;font-weight:600;color:var(--ink)}
+.fo-m{font-size:11px;color:var(--ink3);margin-top:2px}
+.fa{display:flex;gap:10px;margin-top:12px}
+.fa .btn-o{flex:1}
 
-/* ── Tabs ── */
-.tab-bar { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--c-border); }
-.tab-btn { padding: 10px 16px; background: transparent; border: none; border-bottom: 2px solid transparent; font-family: var(--ff-body); font-size: 14px; font-weight: 500; color: var(--c-ink3); cursor: pointer; transition: all 0.15s; margin-bottom: -1px; }
-.tab-btn.active { color: var(--c-accent); border-bottom-color: var(--c-accent); }
-.tab-btn:hover { color: var(--c-ink); }
+/* tabs */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--bd);margin-bottom:20px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:8px 14px;background:transparent;border:none;border-bottom:2.5px solid transparent;font-family:var(--ff);font-size:12.5px;font-weight:500;color:var(--ink3);cursor:pointer;white-space:nowrap;transition:all .14s;margin-bottom:-1px}
+.tab.on{color:var(--sage);border-bottom-color:var(--sage)}
+.tab:hover:not(.on){color:var(--ink)}
 
-/* ── Form modal ── */
-.modal-overlay { position: fixed; inset: 0; background: rgba(3,4,7,0.72); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 500; display: flex; align-items: center; justify-content: center; padding: 20px; }
-.modal-box { background: rgba(14,19,32,0.92); border: 1px solid var(--c-border2); border-radius: var(--r-xl); padding: 28px; width: 100%; max-width: 480px; box-shadow: 0 40px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06); max-height: 90vh; overflow-y: auto; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
-.modal-title { font-family: var(--ff-display); font-size: 20px; font-weight: 600; letter-spacing: -0.01em; color: var(--c-ink); margin-bottom: 20px; }
-.modal-actions { display: flex; gap: 10px; margin-top: 20px; }
-.modal-actions .btn-primary { flex: 1; width: auto; }
-.btn-ghost { padding: 11px 20px; background: transparent; color: var(--c-ink2); border: 1px solid var(--c-border2); border-radius: var(--r); font-family: var(--ff-body); font-size: 15px; cursor: pointer; transition: all 0.12s; }
-.btn-ghost:hover { background: var(--c-glass); color: var(--c-ink); }
+/* timeline */
+.tlw{position:relative;padding-left:32px}
+.tlw::before{content:'';position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:var(--bd2);border-radius:1px}
+.tli{margin-bottom:11px;position:relative}
+.tld{position:absolute;left:-24px;top:11px;width:13px;height:13px;border-radius:50%;background:var(--s);border:2px solid var(--bd2);display:flex;align-items:center;justify-content:center;font-size:7px;z-index:1}
+.tld.done{background:var(--sage);border-color:var(--sage);color:#fff}
+.tld.upcoming{}
+.tld.target{background:var(--rose);border-color:var(--rose);color:#fff}
+.tlc{background:var(--s);border:1px solid var(--bd);border-radius:var(--r);padding:10px 12px;border-left:3px solid transparent;box-shadow:var(--sh);transition:var(--tr)}
+.tlc.done{border-left-color:var(--sage)}.tlc.target{border-left-color:var(--rose)}
+.tlt{display:flex;justify-content:space-between;align-items:center}
+.tltitle{font-size:12.5px;font-weight:500;color:var(--ink)}
+.tlwk{font-size:9.5px;color:var(--ink3)}
+.tldesc{font-size:11.5px;color:var(--ink2);margin-top:2px}
 
-/* ── Invite banner ── */
-.invite-banner { background: var(--c-accent-light); border: 1px solid rgba(74,136,255,0.28); border-radius: var(--r); padding: 14px 18px; display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
-.invite-code { font-family: var(--ff-mono); font-size: 18px; font-weight: 700; color: var(--c-accent-soft); letter-spacing: 2px; }
-.invite-label { font-size: 12px; color: var(--c-ink3); margin-bottom: 2px; }
-.btn-copy { background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft)); color: white; border: none; padding: 6px 14px; border-radius: 8px; font-family: var(--ff-body); font-size: 13px; cursor: pointer; flex-shrink: 0; transition: all 0.15s; box-shadow: 0 4px 16px rgba(74,136,255,0.28); }
-.btn-copy:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(74,136,255,0.4); }
+/* checklist */
+.clc{margin-bottom:7px}
+.clh{display:flex;align-items:center;justify-content:space-between;padding:10px 13px;background:var(--s);border:1px solid var(--bd);border-radius:var(--r);cursor:pointer;transition:background .12s;user-select:none;box-shadow:var(--sh)}
+.clh:hover{background:var(--s2)}.clh.open{border-radius:var(--r) var(--r) 0 0;border-bottom:none}
+.clhl{display:flex;align-items:center;gap:9px}.clhic{font-size:16px}.clhn{font-size:12.5px;font-weight:500;color:var(--ink)}.clhp{font-size:10px;color:var(--ink3);margin-top:1px}
+.clhr{display:flex;align-items:center;gap:7px}
+.clmb{width:38px;height:3px;background:var(--s3);border-radius:2px;overflow:hidden}.clmf{height:100%;background:var(--sage);border-radius:2px}
+.clch{font-size:9px;color:var(--ink3);transition:transform .2s}.clch.open{transform:rotate(180deg)}
+.clis{background:var(--s);border:1px solid var(--bd);border-top:none;border-radius:0 0 var(--r) var(--r)}
+.cli{display:flex;align-items:center;gap:9px;padding:8px 13px;border-bottom:1px solid var(--bd3);cursor:pointer;transition:background .1s}
+.cli:last-child{border-bottom:none}.cli:hover{background:var(--s2)}
+.clbox{width:16px;height:16px;border-radius:4px;border:1.5px solid var(--bd2);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .14s;font-size:9px}
+.clbox.on{background:var(--sage);border-color:var(--sage);color:#fff}
+.clname{flex:1;font-size:12px;color:var(--ink);transition:all .14s}.clname.done{color:var(--ink3);text-decoration:line-through}
 
-/* ── Section label ── */
-.section-label { font-size: 12px; font-weight: 600; color: var(--c-ink3); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; }
+/* emergency */
+.ems{margin-bottom:14px}
+.em-sl{font-size:9.5px;font-weight:600;color:var(--ink3);text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px}
+.emc{display:flex;gap:9px;padding:9px 11px;border-radius:var(--r);margin-bottom:6px}
+.emc.crit{background:var(--rose-lt);border:1px solid var(--rose-mid)}
+.emc.warn{background:var(--amber-lt);border:1px solid var(--amber-mid)}
+.emsym{font-size:12.5px;font-weight:500}
+.emc.crit .emsym{color:var(--rose)}.emc.warn .emsym{color:var(--amber)}
+.emact{font-size:11px;color:var(--ink2);margin-top:2px}
+.emh{background:var(--sage-lt);border:1px solid var(--sage-mid);border-radius:var(--r);padding:11px 14px;margin-top:8px}
+.emhn{font-size:13px;font-weight:500;color:var(--sage);margin-bottom:2px}
+.emhm{font-size:11px;color:var(--ink2)}
 
-/* ── Info pill ── */
-.info-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 8px; font-size: 12px; font-weight: 500; }
-.pill-green { background: var(--c-accent-light); color: var(--c-accent); }
-.pill-amber { background: var(--c-accent2-light); color: var(--c-accent2); }
-.pill-rose { background: var(--c-rose-light); color: var(--c-rose); }
+/* market */
+.mi{padding:14px 18px}
+.mi+.mi{border-top:1px solid var(--bd)}
+.mn{font-size:13.5px;font-weight:500;color:var(--ink)}
+.mm{font-size:11px;color:var(--ink3);margin-top:2px}
+.md{font-size:12px;color:var(--ink2);margin-top:6px;line-height:1.5}
 
-/* ── Skill/Help items ── */
-.list-item { padding: 16px 20px; }
-.list-item + .list-item { border-top: 1px solid var(--c-border); }
-.list-item-title { font-size: 15px; font-weight: 600; color: var(--c-ink); }
-.list-item-meta { font-size: 12px; color: var(--c-ink3); margin-top: 3px; }
-.list-item-desc { font-size: 13px; color: var(--c-ink2); margin-top: 6px; }
+/* profile */
+.ph{text-align:center;padding:22px 0 14px}
+.pname{font-family:var(--ff-s);font-size:20px;font-weight:700;margin:10px 0 3px}
+.pmail{font-size:12px;color:var(--ink3)}
+.pr{display:flex;align-items:center;gap:10px;padding:11px 16px;cursor:pointer;transition:background .12s}
+.pr+.pr{border-top:1px solid var(--bd)}.pr:hover{background:var(--s2)}
+.pric{font-size:15px;width:20px;text-align:center;flex-shrink:0}
+.prl{flex:1;font-size:13px;font-weight:500;color:var(--ink)}
+.prv{font-size:11.5px;color:var(--ink3)}
+.pra{font-size:15px;color:var(--ink3);margin-left:3px}
+.badge-s{background:var(--s3);color:var(--ink3);font-size:10px;padding:2px 7px;border-radius:5px;font-weight:500}
 
-/* ── Profile ── */
-.profile-header { text-align: center; padding: 28px 0 20px; }
-.profile-avatar-lg { width: 80px; height: 80px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 700; color: white; margin: 0 auto 12px; }
-.profile-name { font-family: var(--ff-display); font-size: 22px; font-weight: 700; }
-.profile-email { font-size: 13px; color: var(--c-ink3); margin-top: 3px; }
-.credit-bar { background: var(--c-surface2); border-radius: 6px; height: 8px; overflow: hidden; margin-top: 8px; }
-.credit-fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--c-accent), var(--c-accent2)); }
-.profile-row { display: flex; align-items: center; gap: 12px; padding: 14px 20px; cursor: pointer; }
-.profile-row:hover { background: var(--c-surface2); }
-.profile-row + .profile-row { border-top: 1px solid var(--c-border); }
-.profile-row-icon { font-size: 18px; width: 24px; text-align: center; }
-.profile-row-label { flex: 1; font-size: 14px; font-weight: 500; color: var(--c-ink); }
-.profile-row-value { font-size: 13px; color: var(--c-ink3); }
-.profile-row-arrow { color: var(--c-ink3); font-size: 16px; }
-.btn-danger { width: 100%; padding: 12px; background: transparent; color: var(--c-rose); border: 1.5px solid rgba(255,90,106,0.32); border-radius: var(--r); font-family: var(--ff-body); font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.12s; margin-top: 8px; }
-.btn-danger:hover { background: var(--c-rose-light); border-color: rgba(255,90,106,0.55); }
+/* connections */
+.search-bar{display:flex;gap:9px;margin-bottom:16px}
+.search-inp{flex:1;padding:9px 13px;border:1.5px solid var(--bd2);border-radius:var(--r);font-family:var(--ff);font-size:13.5px;background:var(--s);color:var(--ink);outline:none;transition:border-color .15s}
+.search-inp:focus{border-color:var(--sage)}
+.search-inp::placeholder{color:var(--ink3)}
+.user-row{display:flex;align-items:center;gap:11px;padding:11px 14px;background:var(--s);border:1px solid var(--bd);border-radius:var(--rl);margin-bottom:8px;box-shadow:var(--sh);transition:var(--tr)}
+.user-info{flex:1;min-width:0}
+.user-name{font-size:13.5px;font-weight:500;color:var(--ink)}
+.user-meta{font-size:11px;color:var(--ink3);margin-top:2px}
+.friend-status{display:flex;align-items:center;gap:6px;flex-shrink:0}
 
-/* ── Badge ── */
-.new-badge { background: var(--c-rose); color: white; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px; }
+/* members */
+.mem-row{display:flex;align-items:center;gap:11px;padding:12px 16px}
+.mem-row+.mem-row{border-top:1px solid var(--bd)}
+.mem-info{flex:1;min-width:0}
+.mem-name{font-size:13.5px;font-weight:500;color:var(--ink)}
+.mem-sub{font-size:11px;color:var(--ink3);margin-top:2px}
+.mem-role{font-size:11px;color:var(--ink2);margin-top:1px}
 
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
-
-/* ── Animations ── */
-@keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-.fade-up { animation: fadeUp 0.3s ease forwards; }
+/* misc */
+.es{text-align:center;padding:44px 20px;color:var(--ink3)}
+.esi{font-size:36px;margin-bottom:11px}
+.est{font-size:14.5px;font-weight:500;color:var(--ink2);margin-bottom:3px}
+.esd{font-size:12.5px}
+.ib{border-radius:var(--r);padding:13px 15px;margin-top:12px}
+.ib-a{background:var(--amber-lt);border:1px solid var(--amber-mid)}
+.ib-g{background:var(--sage-lt);border:1px solid var(--sage-mid)}
+.ib-title{font-size:12.5px;font-weight:500;margin-bottom:5px}
+.ib-a .ib-title{color:var(--amber)}.ib-g .ib-title{color:var(--sage)}
+.ib-body{font-size:12px;color:var(--ink2);line-height:1.7}
+.bs{display:flex;align-items:center;justify-content:center;min-height:160px;flex-direction:column;gap:11px;color:var(--ink3);font-size:12.5px}
+.sp{width:26px;height:26px;border:2.5px solid var(--bd2);border-top-color:var(--sage);border-radius:50%;animation:spin .65s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fu{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.fu{animation:fu .25s ease both}
+.toast{position:fixed;top:62px;left:50%;transform:translateX(-50%);z-index:999;padding:9px 18px;background:var(--sage);color:#fff;border-radius:20px;font-size:13px;font-weight:500;box-shadow:0 4px 16px rgba(0,0,0,.18);pointer-events:none;animation:fu .2s ease}
+@media(max-width:520px){.frow{grid-template-columns:1fr}}
 `;
 
-// ─── Avatar Color ─────────────────────────────────────────────────────────────
-const COLORS = ["#4A7C5F","#C4732A","#A3536B","#4A6EA8","#7A5FA0","#2E8B8B"];
-const getAvatarColor = (s: string) => COLORS[s.charCodeAt(0) % COLORS.length];
-const getInitials = (name: string | null | undefined, email: string | null | undefined) => {
-  const n = name || email || "?";
-  return n.slice(0, 2).toUpperCase();
-};
+// ─── Micro ────────────────────────────────────────────────────────────────────
+function Spin(){return <div className="bs"><div className="sp"/><span>加载中…</span></div>;}
+function Msg({t,m}:{t:"e"|"o";m:string}){return <div className={`alert ${t==="e"?"a-err":"a-ok"}`}>{t==="e"?"⚠ ":"✓ "}{m}</div>;}
+function Av({name,email,oid,sz="sm"}:{name?:string|null;email?:string|null;oid:string;sz?:"sm"|"md"|"lg"}){
+  return <div className={`av av-${sz}`} style={{background:aColor(oid||"?")}}>{ini(name,email)}</div>;
+}
+function Toast({msg}:{msg:string}){return <div className="toast">{msg}</div>;}
 
-// ─── Components ───────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return <div className="loading-center"><div className="spinner" /><span>加载中...</span></div>;
+function Modal({title,onClose,footer,children}:{title:string;onClose:()=>void;footer:ReactNode;children:ReactNode}){
+  return(
+    <div className="modal" onClick={onClose}>
+      <div className="modal-bg"/>
+      <div className="modal-box" onClick={e=>e.stopPropagation()}>
+        <div className="modal-hd"><div className="mt">{title}</div></div>
+        <div className="modal-body">{children}</div>
+        <div className="modal-ft">{footer}</div>
+      </div>
+    </div>
+  );
 }
 
-function AlertMsg({ type, msg }: { type: "error" | "success"; msg: string }) {
-  return <div className={`alert alert-${type}`}>{msg}</div>;
+function ThemeToggle({theme,setTheme}:{theme:string;setTheme:(t:"light"|"dark")=>void}){
+  return(
+    <button className="theme-tog" onClick={()=>setTheme(theme==="light"?"dark":"light")}>
+      <span>{theme==="light"?"🌙":"☀️"}</span>
+      <span style={{flex:1,textAlign:"left"}}>{theme==="light"?"切换夜间":"切换白天"}</span>
+    </button>
+  );
 }
 
-// ─── Auth Screen ──────────────────────────────────────────────────────────────
-type AuthMode = "login" | "register" | "forgot" | "reset";
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+function AuthScreen({onAuth}:{onAuth:(u:User)=>void}){
+  const [mode,setMode]=useState<"login"|"reg">("login");
+  // Login uses a flexible identifier (email OR numeric user ID) so existing
+  // users can still log in even if they forgot which email they registered with.
+  const [id,setId]=useState("");
+  const [em,setEm]=useState("");const [pw,setPw]=useState("");const [nm,setNm]=useState("");
+  const [ld,setLd]=useState(false);const [err,setErr]=useState("");const [ok,setOk]=useState("");
+  const [showForgot,setShowForgot]=useState(false);
+  const [forgotEmail,setForgotEmail]=useState("");
+  const [forgotBusy,setForgotBusy]=useState(false);
+  const [forgotMsg,setForgotMsg]=useState("");
+  const [forgotLink,setForgotLink]=useState<string|null>(null);
 
-function AuthScreen({ onAuth }: { onAuth: (u: User) => void }) {
-  // 如果 URL 里带有 ?reset_token=xxx，进入 reset 模式
-  const initialToken = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    return new URLSearchParams(window.location.search).get("reset_token") || "";
-  }, []);
-
-  const [mode, setMode] = useState<AuthMode>(initialToken ? "reset" : "login");
-  const [identifier, setIdentifier] = useState("");
-  const [password, setPassword] = useState("");
-  const [password2, setPassword2] = useState("");
-  const [name, setName] = useState("");
-  const [resetToken, setResetToken] = useState(initialToken);
-  const [resetUrlFallback, setResetUrlFallback] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-
-  const switchMode = (next: AuthMode) => {
-    setMode(next);
-    setError("");
-    setSuccess("");
-    setResetUrlFallback(null);
-  };
-
-  const submit = async () => {
-    setError(""); setSuccess("");
-    try {
-      setLoading(true);
-      if (mode === "register") {
-        if (!identifier || !password) { setError("请填写邮箱和密码"); return; }
-        if (!name) { setError("请填写昵称"); return; }
-        if (password.length < 8) { setError("密码至少 8 位"); return; }
-        setSuccess("正在创建账号…首次启动可能需要 10–20 秒");
-        const res = await (trpc as any).auth.register.mutate({ email: identifier, password, name });
-        setSuccess("注册成功，正在进入…");
-        // Prefer the user object returned by register to avoid a second DB roundtrip
-        // (which on a cold start can hit a fresh lambda and trigger schema bootstrap again).
-        const user = res?.user ?? (await (trpc as any).auth.me.query().catch(() => null));
-        if (user) onAuth(user);
-        else setError("注册成功但获取用户信息失败，请刷新重试");
-      } else if (mode === "login") {
-        if (!identifier || !password) { setError("请填写账号和密码"); return; }
-        const res = await (trpc as any).auth.loginWithIdentifier.mutate({ identifier: identifier.trim(), password });
-        setSuccess("登录成功，正在进入…");
-        const user = res?.user ?? (await (trpc as any).auth.me.query().catch(() => null));
-        if (user) onAuth(user);
-        else setError("登录成功但获取用户信息失败，请刷新重试");
-      } else if (mode === "forgot") {
-        if (!identifier) { setError("请输入你的注册邮箱"); return; }
-        const res = await (trpc as any).auth.requestPasswordReset.mutate({ email: identifier.trim() });
-        setSuccess("如果该邮箱已注册，我们已向你发送重置链接，请查收邮箱（30 分钟内有效）。");
-        if (res?.resetUrl) {
-          // 未配置邮件服务时的过渡方案：前端直接显示重置链接
-          setResetUrlFallback(res.resetUrl);
-        }
-      } else if (mode === "reset") {
-        if (!resetToken) { setError("重置链接无效，请重新申请"); return; }
-        if (password.length < 8) { setError("新密码至少 8 位"); return; }
-        if (password !== password2) { setError("两次输入的密码不一致"); return; }
-        await (trpc as any).auth.resetPassword.mutate({ token: resetToken, newPassword: password });
-        setSuccess("密码已重置，正在登录…");
-        // 清掉 URL 上的 token，避免刷新后再次进入 reset 模式
-        if (typeof window !== "undefined") {
-          const url = new URL(window.location.href);
-          url.searchParams.delete("reset_token");
-          window.history.replaceState({}, "", url.toString());
-        }
-        const user = await (trpc as any).auth.me.query();
-        if (user) onAuth(user);
+  const go=async()=>{
+    setErr("");setOk("");
+    if(mode==="reg"){
+      if(!em.trim()||!pw||!nm.trim()){setErr("请填写邮箱、昵称和密码");return;}
+      if(pw.length<8){setErr("密码至少8位");return;}
+    } else {
+      if(!id.trim()||!pw){setErr("请填写账号和密码");return;}
+    }
+    setLd(true);
+    try{
+      if(mode==="reg"){
+        const res = await (api as any).auth.register.mutate({email:em.trim(),password:pw,name:nm.trim()});
+        setOk("注册成功！");
+        const user = res?.user ?? (await (api as any).auth.me.query().catch(()=>null));
+        if(user) onAuth(user);
+        else setErr("注册成功但获取用户信息失败，请刷新重试");
+      } else {
+        const res = await (api as any).auth.loginWithIdentifier.mutate({identifier:id.trim(),password:pw});
+        const user = res?.user ?? (await (api as any).auth.me.query().catch(()=>null));
+        if(user) onAuth(user);
+        else setErr("登录成功但获取用户信息失败，请刷新重试");
       }
-    } catch (e: any) {
-      setError(e?.message || "操作失败，请重试");
-    } finally {
-      setLoading(false);
-    }
+    }catch(e:any){setErr(e?.message||"操作失败，请重试");}
+    setLd(false);
   };
 
-  const titleMap: Record<AuthMode, string> = {
-    login: "欢迎回来",
-    register: "加入拼朋友",
-    forgot: "找回密码",
-    reset: "设置新密码",
-  };
-  const subtitleMap: Record<AuthMode, string> = {
-    login: "信任圈社交 · 技能共享市场 · 用你的邻居守护你的孩子。",
-    register: "创建你的信任身份，进入真实社区。",
-    forgot: "输入注册邮箱，我们将向你发送带有重置链接的邮件。",
-    reset: "为你的账号设置一个新的登录密码。",
-  };
-  const primaryLabel: Record<AuthMode, React.ReactNode> = {
-    login: <>INITIALIZE UPLINK <span aria-hidden>→</span></>,
-    register: <>CREATE IDENTITY <span aria-hidden>→</span></>,
-    forgot: <>SEND RESET LINK <span aria-hidden>→</span></>,
-    reset: <>UPDATE PASSCODE <span aria-hidden>→</span></>,
+  const submitForgot=async()=>{
+    setForgotMsg(""); setForgotLink(null);
+    if(!forgotEmail.trim()){setForgotMsg("请输入注册邮箱");return;}
+    setForgotBusy(true);
+    try {
+      const r = await (api as any).auth.requestPasswordReset.mutate({email:forgotEmail.trim()});
+      if (r?.resetUrl) {
+        // Dev/无邮箱服务环境：直接展示链接
+        setForgotLink(r.resetUrl);
+        setForgotMsg("邮件服务未配置，下方为重置链接：");
+      } else {
+        setForgotMsg("如果该邮箱已注册，重置链接已发送，请查收邮箱（含垃圾邮件箱）。");
+      }
+    } catch (e:any) { setForgotMsg(e?.message || "请求失败，请稍后重试"); }
+    setForgotBusy(false);
   };
 
-  const onKeyEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") submit();
-  };
-
-  return (
-    <div className="auth-screen">
-      <style>{CSS}</style>
-
-      {/* 科技感角标 */}
-      <div className="auth-tech-label tl">SYS.TRUST // ON-LINE</div>
-      <div className="auth-tech-label bl">UPLINK_ESTABLISHED_</div>
-      <div className="auth-tech-label tr">PINPLE · V04.00</div>
-      <div className="auth-tech-label br">[ 拼 · 朋 · 友 ]</div>
-
-      <div className="auth-card fade-up">
-        {/* 头部：品牌 + 标题 */}
+  return(
+    <div className="auth-s">
+      <div className="auth-card fu">
         <div className="auth-logo">
-          <div className="auth-system-badge">PINPLE.IDENTITY</div>
-          <div className="auth-logo-mark" style={{ marginTop: 14 }}>pin<span>ple</span></div>
-          <h1 className="auth-title">{titleMap[mode]}</h1>
-          <p className="auth-subtitle">{subtitleMap[mode]}</p>
+          <div className="auth-brand">拼<em>朋友</em></div>
+          <div className="auth-tag">找到靠谱的朋友，一起把孩子养大。</div>
         </div>
-
-        {/* 登录 / 注册 切换（在找回/重置模式下隐藏） */}
-        {(mode === "login" || mode === "register") && (
-          <div className="auth-tabs">
-            <button
-              className={`auth-tab ${mode === "login" ? "active" : ""}`}
-              onClick={() => switchMode("login")}
-            >
-              登录
-            </button>
-            <button
-              className={`auth-tab ${mode === "register" ? "active" : ""}`}
-              onClick={() => switchMode("register")}
-            >
-              注册账号
-            </button>
-          </div>
-        )}
-
-        {error && <AlertMsg type="error" msg={error} />}
-        {success && <AlertMsg type="success" msg={success} />}
-
-        {resetUrlFallback && (
-          <div className="alert alert-success" style={{ wordBreak: "break-all" }}>
-            邮件服务暂未配置，请直接使用此链接重置密码：
-            <div style={{ marginTop: 8 }}>
-              <a href={resetUrlFallback} style={{ color: "inherit", textDecoration: "underline" }}>
-                {resetUrlFallback}
-              </a>
-            </div>
-          </div>
-        )}
-
-        {/* 注册专属：昵称 */}
-        {mode === "register" && (
-          <div className="field">
-            <label>NICKNAME · 昵称</label>
-            <input
-              placeholder="例如：苏瑾"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              onKeyDown={onKeyEnter}
-            />
-          </div>
-        )}
-
-        {/* 账号输入：login/register/forgot 都有 */}
-        {(mode === "login" || mode === "register" || mode === "forgot") && (
-          <div className="field">
-            <label>
-              {mode === "login" ? "IDENTIFIER · 邮箱 / 用户 ID" : "IDENTIFIER · 邮箱"}
-            </label>
-            <input
-              type={mode === "login" ? "text" : "email"}
-              placeholder={mode === "login" ? "邮箱地址 或 数字 ID" : "you@domain.net"}
-              autoComplete={mode === "login" ? "username" : "email"}
-              value={identifier}
-              onChange={e => setIdentifier(e.target.value)}
-              onKeyDown={onKeyEnter}
-            />
-          </div>
-        )}
-
-        {/* 密码输入：login/register/reset 需要 */}
-        {(mode === "login" || mode === "register" || mode === "reset") && (
-          <div className="field">
-            <label>
-              PASSCODE · 密码
-              {(mode === "register" || mode === "reset") ? " // ≥ 8" : ""}
-            </label>
-            <input
-              type="password"
-              placeholder="••••••••••••"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              onKeyDown={onKeyEnter}
-            />
-          </div>
-        )}
-
-        {/* 重置密码时再加一个"确认密码" */}
-        {mode === "reset" && (
-          <div className="field">
-            <label>CONFIRM · 再次输入</label>
-            <input
-              type="password"
-              placeholder="••••••••••••"
-              autoComplete="new-password"
-              value={password2}
-              onChange={e => setPassword2(e.target.value)}
-              onKeyDown={onKeyEnter}
-            />
-          </div>
-        )}
-
-        {/* 登录模式下显示"忘记密码" */}
-        {mode === "login" && (
-          <div style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            fontSize: 12,
-            fontFamily: "'JetBrains Mono', monospace",
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-          }}>
-            <button
-              type="button"
-              onClick={() => switchMode("forgot")}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "rgba(255,255,255,0.55)",
-                cursor: "pointer",
-                padding: "4px 2px",
-                fontFamily: "inherit",
-                fontSize: "inherit",
-                letterSpacing: "inherit",
-                textTransform: "inherit",
-              }}
-            >
-              忘记密码？
-            </button>
-          </div>
-        )}
-
-        <button className="btn-primary" onClick={submit} disabled={loading}>
-          {loading ? "处理中…" : primaryLabel[mode]}
-        </button>
-
-        {/* 找回/重置模式下提供返回登录入口 */}
-        {(mode === "forgot" || mode === "reset") && (
-          <div style={{
-            display: "flex",
-            justifyContent: "center",
-            fontSize: 12,
-            fontFamily: "'JetBrains Mono', monospace",
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-          }}>
-            <button
-              type="button"
-              onClick={() => switchMode("login")}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "rgba(255,255,255,0.55)",
-                cursor: "pointer",
-                padding: "4px 2px",
-                fontFamily: "inherit",
-                fontSize: "inherit",
-                letterSpacing: "inherit",
-                textTransform: "inherit",
-              }}
-            >
-              ← 返回登录
-            </button>
-          </div>
-        )}
-
-        <div className="auth-footer">
-          <span>SECURE · E2E · TRUST-RING</span>
-          <span>{new Date().getFullYear()} · PINPLE</span>
+        <div className="auth-tabs">
+          <button className={`atab ${mode==="login"?"on":""}`} onClick={()=>{setMode("login");setErr("");}}>登录</button>
+          <button className={`atab ${mode==="reg"?"on":""}`} onClick={()=>{setMode("reg");setErr("");}}>注册账号</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Family Selector ──────────────────────────────────────────────────────────
-function FamilySelector({ user, onSelect }: { user: User; onSelect: (f: Family) => void }) {
-  const [families, setFamilies] = useState<Family[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showCreate, setShowCreate] = useState(false);
-  const [showJoin, setShowJoin] = useState(false);
-  const [famName, setFamName] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    (trpc as any).family.myFamilies
-      .query()
-      .then((r: Family[]) => {
-        setFamilies(r);
-        setLoading(false);
-      })
-      .catch((err: unknown) => {
-        setLoading(false);
-        if (isAuthError(err)) {
-          handleAuthErrorOnce();
-          return;
+        {err&&<Msg t="e" m={err}/>}{ok&&<Msg t="o" m={ok}/>}
+        {mode==="reg"&&<div className="field"><label>昵称</label><input placeholder="你的名字" value={nm} onChange={e=>setNm(e.target.value)}/></div>}
+        {mode==="reg"
+          ? <div className="field"><label>邮箱</label><input type="email" placeholder="your@email.com" value={em} onChange={e=>setEm(e.target.value)}/></div>
+          : <div className="field"><label>账号</label><input placeholder="邮箱或用户 ID" value={id} onChange={e=>setId(e.target.value)} autoComplete="username"/></div>
         }
-        const msg = (err as { message?: string })?.message ?? "加载家庭失败，请刷新重试";
-        setError(msg);
+        <div className="field"><label>密码{mode==="reg"?"（至少8位）":""}</label><input type="password" placeholder="••••••••" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} autoComplete={mode==="reg"?"new-password":"current-password"}/></div>
+        <button className="btn btn-p btn-full" onClick={go} disabled={ld} style={{marginTop:4}}>{ld?"处理中…":mode==="login"?"登录":"创建账号"}</button>
+        <div className="auth-foot">
+          {mode==="login"
+            ? <button className="btn-link" onClick={()=>{setShowForgot(true);setForgotMsg("");setForgotLink(null);setForgotEmail(em||id);}}>忘记密码？</button>
+            : <span style={{fontSize:11}}>注册即表示同意《用户协议》</span>}
+          <span style={{fontSize:11,color:"var(--ink3)"}}>v4.3</span>
+        </div>
+      </div>
+
+      {showForgot && <Modal
+        title="找回密码"
+        onClose={()=>setShowForgot(false)}
+        footer={<>
+          <button className="btn btn-g" onClick={()=>setShowForgot(false)}>关闭</button>
+          <button className="btn btn-p" onClick={submitForgot} disabled={forgotBusy}>{forgotBusy?"发送中…":"发送重置邮件"}</button>
+        </>}
+      >
+        <div className="field"><label>注册邮箱</label><input type="email" placeholder="your@email.com" value={forgotEmail} onChange={e=>setForgotEmail(e.target.value)} autoFocus/></div>
+        {forgotMsg && <Msg t="o" m={forgotMsg}/>}
+        {forgotLink && <div style={{wordBreak:"break-all",fontSize:11,padding:"8px 10px",background:"var(--s3)",borderRadius:8}}><a href={forgotLink} style={{color:"var(--sage)"}}>{forgotLink}</a></div>}
+        <div className="field-hint" style={{marginTop:10}}>我们将发送一个 30 分钟内有效的重置链接到您的邮箱，点击链接即可设置新密码。</div>
+      </Modal>}
+    </div>
+  );
+}
+
+// ─── Reset password (URL ?reset_token=...) ────────────────────────────────────
+function ResetPasswordScreen({token,onDone}:{token:string;onDone:()=>void}){
+  const [pw,setPw]=useState("");
+  const [pw2,setPw2]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const [ok,setOk]=useState("");
+  const submit=async()=>{
+    setErr("");setOk("");
+    if(pw.length<8){setErr("密码至少 8 位");return;}
+    if(pw!==pw2){setErr("两次输入不一致");return;}
+    setBusy(true);
+    try{
+      await (api as any).auth.resetPassword.mutate({token, newPassword: pw});
+      setOk("已重置！正在为您登录…");
+      setTimeout(()=>{ window.history.replaceState({}, "", "/"); onDone(); }, 800);
+    }catch(e:any){setErr(e?.message||"重置失败，链接可能已过期");}
+    setBusy(false);
+  };
+  return (
+    <div className="auth-s">
+      <div className="auth-card fu">
+        <div className="auth-logo">
+          <div className="auth-brand">拼<em>朋友</em></div>
+          <div className="auth-tag">设置新密码</div>
+        </div>
+        {err&&<Msg t="e" m={err}/>}{ok&&<Msg t="o" m={ok}/>}
+        <div className="field"><label>新密码（至少 8 位）</label><input type="password" value={pw} onChange={e=>setPw(e.target.value)} autoFocus autoComplete="new-password"/></div>
+        <div className="field"><label>确认新密码</label><input type="password" value={pw2} onChange={e=>setPw2(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoComplete="new-password"/></div>
+        <button className="btn btn-p btn-full" onClick={submit} disabled={busy}>{busy?"提交中…":"重置密码"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── FamSelect ────────────────────────────────────────────────────────────────
+function FamSelect({user,onSel}:{user:User;onSel:(f:Family)=>void}){
+  const [fams,setFams]=useState<Family[]>([]);
+  const [ld,setLd]=useState(true);
+  const [showC,setShowC]=useState(false);const [showJ,setShowJ]=useState(false);
+  const [nm,setNm]=useState("");const [code,setCode]=useState("");
+  const [busy,setBusy]=useState(false);const [err,setErr]=useState("");
+  const load=useCallback(async()=>{
+    try{const r=await(api as any).family.myFamilies.query();setFams(r??[]);}
+    catch(e){if(isAuthError(e)) handleAuthErrorOnce(); else setErr((e as any)?.message||"加载家庭列表失败");}
+    setLd(false);
+  },[]);
+  useEffect(()=>{load();},[load]);
+  const doC=async()=>{if(!nm.trim()){setErr("请填写家庭名称");return;}setBusy(true);setErr("");try{const {familyId}=await(api as any).family.create.mutate({name:nm.trim()});const r=await(api as any).family.myFamilies.query();const f=r?.find((x:Family)=>x.id===familyId);if(f)onSel(f);}catch(e:any){setErr(e?.message||"创建失败");}setBusy(false);};
+  const doJ=async()=>{if(!code.trim()){setErr("请输入邀请码");return;}setBusy(true);setErr("");try{const {familyId}=await(api as any).family.join.mutate({inviteCode:code.trim().toUpperCase()});const r=await(api as any).family.myFamilies.query();const f=r?.find((x:Family)=>x.id===familyId);if(f)onSel(f);}catch(e:any){setErr(e?.message||"加入失败");}setBusy(false);};
+  if(ld)return <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}><div className="sp"/></div>;
+  return(
+    <div className="fs">
+      <div className="fs-in fu">
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
+          <Av name={user.name} email={user.email} oid={user.openId} sz="md"/>
+          <div><div style={{fontSize:15,fontWeight:500,color:"var(--ink)"}}>{user.name||user.email}</div><div style={{fontSize:11.5,color:"var(--ink3)"}}>欢迎回来</div></div>
+        </div>
+        <div className="fs-t">选择家庭</div>
+        <div className="fs-s">选择或创建你的家庭空间</div>
+        {err&&<Msg t="e" m={err}/>}
+        {fams.length===0&&<div className="es"><div className="esi">🏡</div><div className="est">还没有家庭</div><div className="esd">创建或加入开始使用</div></div>}
+        {fams.map(f=>(<div key={f.id} className="fo" onClick={()=>onSel(f)}><div><div className="fo-n">{f.name}</div><div className="fo-m">邀请码 {f.inviteCode} · {f.memberRole==="admin"?"管理员":f.memberRole==="collaborator"?"协作者":"观察者"}</div></div><span style={{color:"var(--ink3)",fontSize:20}}>›</span></div>))}
+        <div className="fa"><button className="btn btn-o" onClick={()=>setShowC(true)}>+ 创建家庭</button><button className="btn btn-o" onClick={()=>setShowJ(true)}>加入家庭</button></div>
+      </div>
+      {showC&&<Modal title="创建新家庭" onClose={()=>setShowC(false)} footer={<><button className="btn btn-g" onClick={()=>setShowC(false)}>取消</button><button className="btn btn-p" onClick={doC} disabled={busy}>{busy?"创建中…":"创建"}</button></>}><div className="field"><label>家庭名称</label><input placeholder="例：我们一家" value={nm} onChange={e=>setNm(e.target.value)} autoFocus/></div></Modal>}
+      {showJ&&<Modal title="加入家庭" onClose={()=>setShowJ(false)} footer={<><button className="btn btn-g" onClick={()=>setShowJ(false)}>取消</button><button className="btn btn-p" onClick={doJ} disabled={busy}>{busy?"加入中…":"加入"}</button></>}><div className="field"><label>邀请码</label><input placeholder="大写字母+数字" value={code} onChange={e=>setCode(e.target.value.toUpperCase())} autoFocus/></div></Modal>}
+    </div>
+  );
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+function Dashboard({fam,kids,tasks,onNav}:{fam:Family;kids:Child[];tasks:Task[];onNav:(p:string)=>void}){
+  const child=kids[0];const pg=child?calcWeeks(child):null;
+  const edd=child?.eddInfo?.edd;const dl=daysTo(edd);
+  const total=tasks.reduce((s,t)=>s+(t.todayCheckins||0),0);
+  const [copied,setCopied]=useState(false);
+  const copy=()=>{navigator.clipboard?.writeText(fam.inviteCode).catch(()=>{});setCopied(true);setTimeout(()=>setCopied(false),2000);};
+  return(
+    <div className="fu">
+      <div className="hero">
+        <div className="hi">
+          <div className="ht">{child?child.nickname:fam.name}</div>
+          <div className="hs2">{fam.name}{dl!=null&&dl>0?` · ${dl}天后迎接宝宝`:""}</div>
+          <div className="h-stats">
+            {pg&&<div><div className="hv">{pg.weeks}<span style={{fontSize:14,fontWeight:400,opacity:.8}}>+{pg.days}</span></div><div className="hl">当前孕周</div></div>}
+            {dl!=null&&dl>=0&&<div><div className="hv">{dl}</div><div className="hl">距预产天</div></div>}
+            <div><div className="hv">{total}</div><div className="hl">今日打卡</div></div>
+          </div>
+        </div>
+      </div>
+      <div className="inv">
+        <div className="inv-info">
+          <div className="inv-lbl">家庭邀请码</div>
+          <div className="inv-code">{fam.inviteCode}</div>
+          <div className="inv-sub">分享给家人，一起加入管理</div>
+        </div>
+        <div className="inv-btns">
+          <button className="btn-copy" onClick={copy}>{copied?"✓ 已复制":"复制"}</button>
+          <button className="btn-icon" onClick={()=>onNav("members")}>成员</button>
+        </div>
+      </div>
+      {kids.length>0&&<>
+        <div className="sl2">宝宝档案</div>
+        <div className="cg-grid" style={{marginBottom:18}}>
+          {kids.map(c=>{const cpg=calcWeeks(c);return(
+            <div key={c.id} className="cc">
+              <div className="cc-top">
+                <div className="cc-bub" style={{background:"var(--sage-lt)"}}>{c.gender==="girl"?"👧":"👶"}</div>
+                <div><div className="cn">{c.nickname}</div><div className="cg2">{c.gender==="girl"?"女宝宝":c.gender==="boy"?"男宝宝":"性别待定"}</div></div>
+              </div>
+              {cpg?<div className="wr"><div className="wb">{cpg.weeks}</div><div className="wu">周 + {cpg.days}天</div></div>
+               :c.ageInfo&&<div style={{fontFamily:"var(--ff-s)",fontSize:28,fontWeight:700,color:"var(--sage)"}}>{c.ageInfo.years>0?`${c.ageInfo.years}岁${c.ageInfo.months}月`:`${c.ageInfo.months}月${c.ageInfo.days}天`}</div>}
+              {c.eddInfo?.edd&&<div className="edd-tag">🎯 预产期 {fmt(c.eddInfo.edd,{year:"numeric",month:"long",day:"numeric"})}</div>}
+            </div>
+          );})}
+        </div>
+      </>}
+      {tasks.length>0&&<>
+        <div className="sl2">今日打卡</div>
+        <div className="tg">{tasks.slice(0,4).map(t=>(<div key={t.id} className="tc" style={{borderTopColor:t.color||"var(--sage)"}}><span className="tic">{t.icon||"📋"}</span><div className="tn">{t.title}</div><div className="tv">{t.todayCheckins}</div><div className="tl">今日次数</div></div>))}</div>
+      </>}
+      {kids.length===0&&tasks.length===0&&<div className="es"><div className="esi">🌱</div><div className="est">开始使用拼朋友</div><div className="esd">前往「宝宝」添加档案，开始记录</div></div>}
+    </div>
+  );
+}
+
+// ─── Children ─────────────────────────────────────────────────────────────────
+function Children({fam,kids,onRefresh}:{fam:Family;kids:Child[];onRefresh:()=>void}){
+  const [show,setShow]=useState(false);const [busy,setBusy]=useState(false);const [err,setErr]=useState("");
+  const blank={nickname:"",gender:"unknown" as "unknown"|"boy"|"girl",pregnancyRefDate:"",pregnancyWeeksAtRef:12,pregnancyDaysAtRef:0,notes:""};
+  const [f,setF]=useState(blank);
+  const reset=()=>setF(blank);
+  const doAdd=async()=>{
+    if(!f.nickname.trim()){setErr("请填写宝宝昵称");return;}
+    setBusy(true);setErr("");
+    try{
+      await(api as any).children.create.mutate({
+        familyId:fam.id,nickname:f.nickname.trim(),
+        gender:f.gender==="unknown"?undefined:f.gender,
+        pregnancyRefDate:f.pregnancyRefDate||undefined,
+        pregnancyWeeksAtRef:f.pregnancyRefDate?f.pregnancyWeeksAtRef:undefined,
+        pregnancyDaysAtRef:f.pregnancyRefDate?f.pregnancyDaysAtRef:undefined,
+        notes:f.notes||undefined,
       });
-  }, []);
-
-  const createFamily = async () => {
-    if (!famName.trim()) { setError("请输入家庭名称"); return; }
-    setBusy(true); setError("");
-    try {
-      const { familyId } = await (trpc as any).family.create.mutate({ name: famName });
-      const updated = await (trpc as any).family.myFamilies.query();
-      setFamilies(updated);
-      const newFam = updated.find((f: Family) => f.id === familyId);
-      if (newFam) onSelect(newFam);
-    } catch (e: any) { setError(e?.message || "创建失败"); }
+      onRefresh();setShow(false);reset();
+    }catch(e:any){setErr(e?.message||"添加失败");}
     setBusy(false);
   };
-
-  const joinFamily = async () => {
-    if (!inviteCode.trim()) { setError("请输入邀请码"); return; }
-    setBusy(true); setError("");
-    try {
-      const { familyId } = await (trpc as any).family.join.mutate({ inviteCode: inviteCode.trim().toUpperCase() });
-      const updated = await (trpc as any).family.myFamilies.query();
-      setFamilies(updated);
-      const joined = updated.find((f: Family) => f.id === familyId);
-      if (joined) onSelect(joined);
-    } catch (e: any) { setError(e?.message || "加入失败"); }
-    setBusy(false);
-  };
-
-  if (loading) return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><div className="spinner" /></div>;
-
-  return (
-    <div className="family-select-screen">
-      <style>{CSS}</style>
-      <div className="auth-tech-label tl">PINPLE · FAMILY SELECTOR</div>
-      <div className="auth-tech-label tr">STEP 02 / 02</div>
-      <div className="family-select-inner fade-up">
-        <div className="family-select-badge">WORKSPACE</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: getAvatarColor(user.openId), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontWeight: 700, fontSize: 15, boxShadow: "0 8px 24px rgba(74,136,255,0.28)" }}>
-            {getInitials(user.name, user.email)}
+  return(
+    <div className="fu">
+      <div className="pg-head"><div className="rb"><div><div className="pg-t">宝宝档案</div><div className="pg-s">孕期信息与成长记录</div></div><button className="btn btn-o btn-sm" onClick={()=>setShow(true)}>+ 添加档案</button></div></div>
+      {kids.length===0?<div className="es"><div className="esi">👶</div><div className="est">还没有宝宝档案</div><div className="esd">点击右上角添加</div></div>:
+      <div className="cg-grid">{kids.map(c=>{const pg=calcWeeks(c);return(
+        <div key={c.id} className="cc">
+          <div className="cc-top">
+            <div className="cc-bub" style={{background:"var(--sage-lt)"}}>{c.gender==="girl"?"👧":"👶"}</div>
+            <div><div className="cn">{c.nickname}</div><div className="cg2">{c.gender==="girl"?"女宝宝":c.gender==="boy"?"男宝宝":"性别待定"}</div></div>
           </div>
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>{user.name || user.email}</div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontFamily: "var(--ff-mono)", letterSpacing: "0.12em", textTransform: "uppercase", marginTop: 2 }}>欢迎回来 · Online</div>
+          {pg?<div className="wr"><div className="wb">{pg.weeks}</div><div className="wu">周 + {pg.days}天</div></div>
+           :c.ageInfo&&<div style={{fontFamily:"var(--ff-s)",fontSize:28,fontWeight:700,color:"var(--sage)"}}>{c.ageInfo.years>0?`${c.ageInfo.years}岁${c.ageInfo.months}月`:`${c.ageInfo.months}月${c.ageInfo.days}天`}</div>}
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:8}}>
+            {c.eddInfo?.edd&&<span className="pill p-a">预产 {fmt(c.eddInfo.edd)}</span>}
           </div>
+          {c.notes&&<div style={{marginTop:10,padding:"8px 11px",background:"var(--s3)",borderRadius:8,fontSize:12,color:"var(--ink2)",lineHeight:1.6}}>{c.notes}</div>}
         </div>
-        <div className="family-select-title">选择家庭空间</div>
-        <div className="family-select-sub">选择一个家庭继续，或创建新的协作空间</div>
-        {error && <AlertMsg type="error" msg={error} />}
-        {families.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "32px 0", color: "var(--c-ink3)", fontSize: 14 }}>还没有家庭，创建或加入一个吧 👨‍👩‍👧</div>
-        ) : (
-          families.map(f => (
-            <div key={f.id} className="family-option" onClick={() => onSelect(f)}>
-              <div>
-                <div className="family-option-name">{f.name}</div>
-                <div className="family-option-code">邀请码：{f.inviteCode} · 角色：{f.memberRole === "admin" ? "管理员" : f.memberRole === "collaborator" ? "协作者" : "观察者"}</div>
-              </div>
-              <span className="family-option-arrow">›</span>
-            </div>
-          ))
-        )}
-        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-          <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowCreate(true)}>+ 创建家庭</button>
-          <button className="btn-outline" style={{ flex: 1 }} onClick={() => setShowJoin(true)}>加入家庭</button>
+      );})}</div>}
+      {show&&<Modal title="添加宝宝档案" onClose={()=>{setShow(false);reset();}} footer={<><button className="btn btn-g" onClick={()=>{setShow(false);reset();}}>取消</button><button className="btn btn-p" onClick={doAdd} disabled={busy}>{busy?"添加中…":"添加"}</button></>}>
+        {err&&<Msg t="e" m={err}/>}
+        <div className="field"><label>宝宝昵称</label><input placeholder="例：小宝、糖糖…" value={f.nickname} onChange={e=>setF(p=>({...p,nickname:e.target.value}))} autoFocus/></div>
+        <div className="field"><label>性别</label><select value={f.gender} onChange={e=>setF(p=>({...p,gender:e.target.value as any}))}><option value="unknown">暂不填写</option><option value="boy">男宝宝</option><option value="girl">女宝宝</option></select></div>
+        <div className="field">
+          <label>某次产检的日期（用于推算孕周）</label>
+          <input type="date" value={f.pregnancyRefDate} onChange={e=>setF(p=>({...p,pregnancyRefDate:e.target.value}))}/>
+          <div className="field-hint">填入任意产检日期，再填当时的孕周+天数，自动推算当前孕周和预产期。不知道可以跳过。</div>
         </div>
-      </div>
-      {showCreate && (
-        <div className="modal-overlay" onClick={() => setShowCreate(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">创建新家庭</div>
-            <div className="field"><label>家庭名称</label><input placeholder="例：小橙子一家" value={famName} onChange={e => setFamName(e.target.value)} /></div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowCreate(false)}>取消</button>
-              <button className="btn-primary" onClick={createFamily} disabled={busy}>{busy ? "创建中…" : "创建"}</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {showJoin && (
-        <div className="modal-overlay" onClick={() => setShowJoin(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">加入家庭</div>
-            <div className="field"><label>邀请码</label><input placeholder="输入6-8位邀请码" value={inviteCode} onChange={e => setInviteCode(e.target.value.toUpperCase())} /></div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowJoin(false)}>取消</button>
-              <button className="btn-primary" onClick={joinFamily} disabled={busy}>{busy ? "加入中…" : "加入"}</button>
-            </div>
-          </div>
-        </div>
-      )}
+        {f.pregnancyRefDate&&<div className="frow">
+          <div className="field"><label>当时是第几周</label><input type="number" min={0} max={42} value={f.pregnancyWeeksAtRef} onChange={e=>setF(p=>({...p,pregnancyWeeksAtRef:+e.target.value}))}/></div>
+          <div className="field"><label>加几天（0-6）</label><input type="number" min={0} max={6} value={f.pregnancyDaysAtRef} onChange={e=>setF(p=>({...p,pregnancyDaysAtRef:+e.target.value}))}/></div>
+        </div>}
+        <div className="field"><label>备注（可选）</label><input placeholder="任何想记录的信息…" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/></div>
+      </Modal>}
     </div>
   );
 }
 
-// ─── Dashboard Page ───────────────────────────────────────────────────────────
-function DashboardPage({ family, user, children, tasks }: { family: Family; user: User; children: Child[]; tasks: RoutineTask[] }) {
-  const child = children[0];
-  const pg = child ? calcCurrentPregnancyWeeks(child) : null;
-  const eddDate = child?.eddInfo?.twin37w || child?.eddInfo?.edd;
-  const daysLeft = daysUntil(eddDate?.toString());
-  const totalCheckins = tasks.reduce((s, t) => s + t.todayCheckins, 0);
-
-  return (
-    <div className="fade-up">
-      <div className="hero-card">
-        <div style={{ position: "relative", zIndex: 1 }}>
-          <div className="hero-title">{family.name} 👶</div>
-          <div className="hero-sub">
-            {children.map(c => c.childOneName || c.nickname).filter(Boolean).join(" & ") || "家庭管理中心"}
-            {child?.isMultiple && " · 龙凤胎 DCDA"}
-          </div>
-          <div className="hero-stats">
-            {pg && (
-              <div className="hero-stat">
-                <div className="hero-stat-val">{pg.weeks}+{pg.days}</div>
-                <div className="hero-stat-label">当前孕周</div>
-              </div>
-            )}
-            {daysLeft !== null && (
-              <div className="hero-stat">
-                <div className="hero-stat-val">{daysLeft > 0 ? daysLeft : 0}</div>
-                <div className="hero-stat-label">距预产还剩天</div>
-              </div>
-            )}
-            <div className="hero-stat">
-              <div className="hero-stat-val">{totalCheckins}</div>
-              <div className="hero-stat-label">今日打卡</div>
+// ─── Manual ───────────────────────────────────────────────────────────────────
+function Manual({kids}:{kids:Child[]}){
+  const child=kids[0];const pg=child?calcWeeks(child):null;
+  const [tab,setTab]=useState<"tl"|"items"|"em">("tl");
+  const [ck,setCk]=useState<Record<string,boolean>>(()=>{try{return JSON.parse(localStorage.getItem("ppy_cl")||"{}");}catch{return{};}});
+  const [oCat,setOCat]=useState<number|null>(0);
+  const tog=(ci:number,ii:number)=>{const k=`${ci}-${ii}`;setCk(p=>{const n={...p,[k]:!p[k]};localStorage.setItem("ppy_cl",JSON.stringify(n));return n;});};
+  const total=ITEMS.reduce((s,c)=>s+c.items.length,0);
+  const done=Object.values(ck).filter(Boolean).length;
+  const pct=Math.round((done/total)*100);
+  const emG=EM.reduce((a,e)=>{if(!a[e.t])a[e.t]=[];a[e.t].push(e);return a;},{} as Record<string,(typeof EM)[number][]>);
+  return(
+    <div className="fu">
+      <div className="pg-head"><div className="pg-t">孕育手册</div><div className="pg-s">{pg?`孕 ${pg.weeks}+${pg.days} 周 · `:""}孕期节点 · 待产清单 · 应急预案</div></div>
+      <div className="tabs">
+        <button className={`tab ${tab==="tl"?"on":""}`} onClick={()=>setTab("tl")}>📅 孕期节点</button>
+        <button className={`tab ${tab==="items"?"on":""}`} onClick={()=>setTab("items")}>🛒 待产清单 {pct}%</button>
+        <button className={`tab ${tab==="em"?"on":""}`} onClick={()=>setTab("em")}>🚨 应急预案</button>
+      </div>
+      {tab==="tl"&&<div>
+        {child&&pg&&<div className="card" style={{display:"flex",gap:20,alignItems:"center",marginBottom:18,flexWrap:"wrap"}}>
+          <div><div style={{fontSize:11,color:"var(--ink3)"}}>当前孕周</div><div style={{fontFamily:"var(--ff-s)",fontSize:40,fontWeight:700,color:"var(--sage)",lineHeight:1}}>{pg.weeks}<span style={{fontSize:15,color:"var(--ink3)"}}>+{pg.days}天</span></div></div>
+          {child.eddInfo?.edd&&<div style={{borderLeft:"1px solid var(--bd)",paddingLeft:20}}><div style={{fontSize:11,color:"var(--ink3)"}}>预产期</div><div style={{fontFamily:"var(--ff-s)",fontSize:19,fontWeight:700,color:"var(--amber)",marginTop:3}}>{fmt(child.eddInfo.edd,{year:"numeric",month:"long",day:"numeric"})}</div><div style={{fontSize:11,color:"var(--ink3)",marginTop:2}}>还有 {Math.max(0,daysTo(child.eddInfo.edd)??0)} 天</div></div>}
+        </div>}
+        <div className="tlw">{TL_NODES.map((n,i)=><div key={i} className="tli"><div className={`tld ${n.s}`}>{n.s==="done"?"✓":n.s==="target"?"♥":""}</div><div className={`tlc ${n.s}`}><div className="tlt"><span className="tltitle">{n.title}</span><span className="tlwk">{n.week}</span></div><div className="tldesc">{n.desc}</div></div></div>)}</div>
+      </div>}
+      {tab==="items"&&<div>
+        <div className="rb" style={{marginBottom:8}}><span style={{fontSize:12,color:"var(--ink3)"}}>{done}/{total} 已准备</span><span style={{fontSize:12,fontWeight:600,color:"var(--sage)"}}>{pct}%</span></div>
+        <div className="prog" style={{marginBottom:16}}><div className="prog-f" style={{width:`${pct}%`}}/></div>
+        {ITEMS.map((cat,ci)=>{const cd=cat.items.filter((_,ii)=>ck[`${ci}-${ii}`]).length;const io=oCat===ci;return(
+          <div key={ci} className="clc">
+            <div className={`clh ${io?"open":""}`} onClick={()=>setOCat(io?null:ci)}>
+              <div className="clhl"><span className="clhic">{cat.icon}</span><div><div className="clhn">{cat.cat}</div><div className="clhp">{cd}/{cat.items.length} 已准备</div></div></div>
+              <div className="clhr"><div className="clmb"><div className="clmf" style={{width:`${Math.round((cd/cat.items.length)*100)}%`}}/></div><span className={`clch ${io?"open":""}`}>▼</span></div>
             </div>
+            {io&&<div className="clis">{cat.items.map((item,ii)=>{const k=`${ci}-${ii}`;const on=!!ck[k];return(<div key={ii} className="cli" onClick={()=>tog(ci,ii)}><div className={`clbox ${on?"on":""}`}>{on?"✓":""}</div><span className={`clname ${on?"done":""}`}>{item}</span></div>);})}</div>}
           </div>
-        </div>
-      </div>
-
-      {children.length > 0 && (
-        <>
-          <div className="section-label">孩子档案</div>
-          <div className="children-grid" style={{ marginBottom: 24 }}>
-            {children.map(c => {
-              const cpg = calcCurrentPregnancyWeeks(c);
-              return (
-                <div key={c.id} className="child-card">
-                  <div className="child-card-top">
-                    <div className="child-bubble" style={{ background: c.gender === "girl" ? "var(--c-rose-light)" : "var(--c-accent-light)", fontSize: 22 }}>
-                      {c.gender === "girl" ? "👧" : c.gender === "boy" ? "👦" : "👶"}
-                    </div>
-                    <div>
-                      <div className="child-name">{c.childOneName && c.childTwoName ? `${c.childOneName} & ${c.childTwoName}` : c.nickname}</div>
-                      <div className="child-gender">{c.isMultiple ? "双胎 DCDA" : c.gender === "girl" ? "女宝" : c.gender === "boy" ? "男宝" : "性别待定"}</div>
-                    </div>
-                  </div>
-                  {cpg && (
-                    <div className="child-pregnancy">
-                      <div className="week-big">{cpg.weeks}</div>
-                      <div className="week-label">周+{cpg.days}天</div>
-                    </div>
-                  )}
-                  {(c.eddInfo?.twin37w || c.eddInfo?.edd) && (
-                    <div className="edd-badge">
-                      🎯 {c.isMultiple ? "37周" : ""}预产 {fmt(c.eddInfo.twin37w?.toString() || c.eddInfo.edd?.toString())}
-                    </div>
-                  )}
-                  {c.notes && <div className="child-meta" style={{ marginTop: 8 }}>{c.notes}</div>}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {/* Family invite code */}
-      <div className="invite-banner">
-        <div style={{ flex: 1 }}>
-          <div className="invite-label">家庭邀请码</div>
-          <div className="invite-code">{family.inviteCode}</div>
-        </div>
-        <button className="btn-copy" onClick={() => navigator.clipboard?.writeText(family.inviteCode)}>复制</button>
-      </div>
-
-      {/* Today tasks quick overview */}
-      {tasks.length > 0 && (
-        <>
-          <div className="section-label" style={{ marginTop: 24 }}>今日打卡</div>
-          <div className="task-grid">
-            {tasks.slice(0, 4).map(t => (
-              <div key={t.id} className="task-card" style={{ "--accent": t.color || "#4A7C5F" } as any}>
-                <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: t.color || "var(--c-accent)", borderRadius: "var(--r) var(--r) 0 0" }} />
-                <div className="task-top">
-                  <div className="task-title">{t.title}</div>
-                  <span style={{ fontSize: 18 }}>{t.icon || "📋"}</span>
-                </div>
-                <div className="task-count">{t.todayCheckins}</div>
-                <div className="task-label">今日次数</div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+        );})}
+      </div>}
+      {tab==="em"&&<div>
+        {Object.entries(emG).map(([t2,items])=>(<div key={t2} className="ems"><div className="em-sl">{t2==="孕期"?"🤰":t2==="产后"?"🌸":"👶"} {t2}</div>{items.map((item,i)=><div key={i} className={`emc ${item.l}`}><span style={{fontSize:15,flexShrink:0,lineHeight:1.5}}>{item.l==="crit"?"🚨":"⚠️"}</span><div><div className="emsym">{item.s}</div><div className="emact">{item.a}</div></div></div>)}</div>))}
+        <div className="emh"><div className="emhn">📍 紧急求助</div><div className="emhm">产科急诊 / 儿科急诊 · 拨打 120 全国急救热线 · 就近医院就医</div></div>
+      </div>}
     </div>
   );
 }
 
-// ─── Children Page ────────────────────────────────────────────────────────────
-function ChildrenPage({ family, children, onRefresh }: { family: Family; children: Child[]; onRefresh: () => void }) {
-  const [showAdd, setShowAdd] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [form, setForm] = useState({ nickname: "", isMultiple: false, childOneName: "", childTwoName: "", childOneGender: "unknown", childTwoGender: "unknown", pregnancyRefDate: "", pregnancyWeeksAtRef: 8, embryoTransferDate: "", embryoDay: 5, notes: "" });
+// ─── Tasks ────────────────────────────────────────────────────────────────────
+function Tasks({fam,tasks,onRefresh}:{fam:Family;tasks:Task[];onRefresh:()=>void}){
+  const [busy,setBusy]=useState<number|null>(null);
+  const [show,setShow]=useState(false);
+  const [f,setF]=useState({title:"",icon:"📋",color:"#3D7A5A",category:"other"});
+  const ck=async(id:number)=>{setBusy(id);try{await(api as any).tasks.checkin.mutate({taskId:id});onRefresh();}catch{}setBusy(null);};
+  const add=async()=>{if(!f.title.trim())return;try{await(api as any).tasks.create.mutate({familyId:fam.id,...f});onRefresh();setShow(false);}catch{}};
+  const CL:Record<string,string>={feeding:"喂养",sleep:"睡眠",checkup:"检查",play:"运动",bath:"洗浴",other:"其他"};
+  return(
+    <div className="fu">
+      <div className="pg-head"><div className="rb"><div><div className="pg-t">日常打卡</div><div className="pg-s">今日已打卡 {tasks.reduce((s,t)=>s+(t.todayCheckins||0),0)} 次</div></div><button className="btn btn-o btn-sm" onClick={()=>setShow(true)}>+ 新任务</button></div></div>
+      {tasks.length===0?<div className="es"><div className="esi">✅</div><div className="est">还没有打卡任务</div></div>:
+      <div className="tg">{tasks.filter(t=>t.isActive!==false).map(t=>(<div key={t.id} className="tc" style={{borderTopColor:t.color||"var(--sage)"}}><span className="tic">{t.icon||"📋"}</span><div className="tn">{t.title}</div><div className="tcat">{CL[t.category]||t.category}</div><div className="tv">{t.todayCheckins}</div><div className="tl">今日次数</div><button className="btck" style={{background:busy===t.id?"var(--s3)":t.color||"var(--sage)",color:busy===t.id?"var(--ink3)":"#fff"}} onClick={()=>ck(t.id)} disabled={busy===t.id}>{busy===t.id?"记录中…":"✓ 打卡"}</button></div>))}</div>}
+      {show&&<Modal title="添加打卡任务" onClose={()=>setShow(false)} footer={<><button className="btn btn-g" onClick={()=>setShow(false)}>取消</button><button className="btn btn-p" onClick={add}>添加</button></>}>
+        <div className="field"><label>任务名称</label><input placeholder="例：体重记录" value={f.title} onChange={e=>setF(p=>({...p,title:e.target.value}))} autoFocus/></div>
+        <div className="frow"><div className="field"><label>图标</label><input value={f.icon} onChange={e=>setF(p=>({...p,icon:e.target.value}))}/></div><div className="field"><label>颜色</label><input type="color" value={f.color} onChange={e=>setF(p=>({...p,color:e.target.value}))} style={{height:40,cursor:"pointer"}}/></div></div>
+        <div className="field"><label>类别</label><select value={f.category} onChange={e=>setF(p=>({...p,category:e.target.value}))}><option value="feeding">喂养</option><option value="sleep">睡眠</option><option value="checkup">检查</option><option value="play">运动</option><option value="bath">洗浴</option><option value="other">其他</option></select></div>
+      </Modal>}
+    </div>
+  );
+}
 
-  const addChild = async () => {
-    if (!form.nickname) { setError("请填写昵称"); return; }
-    setBusy(true); setError("");
-    try {
-      await (trpc as any).children.create.mutate({
-        familyId: family.id,
-        nickname: form.nickname,
-        isMultiple: form.isMultiple,
-        childOneName: form.childOneName || undefined,
-        childTwoName: form.childTwoName || undefined,
-        childOneGender: form.childOneGender as any,
-        childTwoGender: form.childTwoGender as any,
-        pregnancyRefDate: form.pregnancyRefDate || undefined,
-        pregnancyWeeksAtRef: form.pregnancyRefDate ? form.pregnancyWeeksAtRef : undefined,
-        embryoTransferDate: form.embryoTransferDate || undefined,
-        embryoDay: form.embryoTransferDate ? form.embryoDay : undefined,
-        notes: form.notes || undefined,
-      });
-      onRefresh(); setShowAdd(false);
-    } catch (e: any) { setError(e?.message || "添加失败"); }
+// ─── Market ───────────────────────────────────────────────────────────────────
+function Market(){
+  const [tab,setTab]=useState<"sk"|"rq"|"me">("sk");
+  const [sk,setSk]=useState<Skill[]>([]);const [rq,setRq]=useState<HelpReq[]>([]);const [me,setMe]=useState<Skill[]>([]);
+  const [ld,setLd]=useState(true);
+  const [shS,setShS]=useState(false);const [shR,setShR]=useState(false);
+  const [sf,setSf]=useState({name:"",category:"other",description:"",location:"",priceMin:"",priceMax:""});
+  const [rf,setRf]=useState({title:"",description:"",location:"",urgency:"medium"});
+  const load=useCallback(async()=>{setLd(true);try{const[a,b,c]=await Promise.all([(api as any).skills.list.query({limit:20,offset:0}),(api as any).helpRequests.list.query({limit:20,offset:0}),(api as any).skills.mySkills.query()]);setSk(a||[]);setRq(b||[]);setMe(c||[]);}catch{}setLd(false);},[]);
+  useEffect(()=>{load();},[load]);
+  const pubS=async()=>{if(!sf.name.trim())return;try{await(api as any).skills.create.mutate(sf);load();setShS(false);}catch(e:any){alert(e?.message||"发布失败");}};
+  const pubR=async()=>{if(!rf.title.trim())return;try{await(api as any).helpRequests.create.mutate(rf);load();setShR(false);}catch(e:any){alert(e?.message||"发布失败");}};
+  const CL:Record<string,string>={education:"教育",childcare:"育儿",housekeeping:"家政",tech:"技术",other:"其他"};
+  const UL:Record<string,string>={low:"不急",medium:"一般",high:"紧急"};
+  return(
+    <div className="fu">
+      <div className="pg-head"><div className="rb"><div><div className="pg-t">技能市场</div><div className="pg-s">信任圈内发布与寻找服务</div></div><div className="re"><button className="btn btn-o btn-sm" onClick={()=>setShS(true)}>+ 发布技能</button><button className="btn btn-sm" style={{padding:"6px 11px",background:"transparent",color:"var(--amber)",border:"1.5px solid var(--amber-mid)",borderRadius:"var(--r)",fontFamily:"var(--ff)",fontSize:"11.5px",cursor:"pointer"}} onClick={()=>setShR(true)}>+ 发布求助</button></div></div></div>
+      <div className="tabs">{[["sk","技能列表"],["rq","求助列表"],["me","我的发布"]].map(([k,l])=><button key={k} className={`tab ${tab===k?"on":""}`} onClick={()=>setTab(k as any)}>{l}</button>)}</div>
+      {ld?<Spin/>:<>
+        {tab==="sk"&&(sk.length===0?<div className="es"><div className="esi">🛍</div><div className="est">暂无技能发布</div></div>:<div className="card card-p0">{sk.map((s,i)=><div key={i} className="mi"><div className="rb"><div><div className="mn">{s.name}</div><div className="mm">{CL[s.category||""]||s.category}{s.location?` · ${s.location}`:""}</div></div>{(s.priceMin||s.priceMax)&&<span className="pill p-a">¥{s.priceMin}~{s.priceMax}</span>}</div>{s.description&&<div className="md">{s.description}</div>}</div>)}</div>)}
+        {tab==="rq"&&(rq.length===0?<div className="es"><div className="esi">🙋</div><div className="est">暂无求助</div></div>:<div className="card card-p0">{rq.map((r,i)=><div key={i} className="mi"><div className="rb"><div className="mn">{r.title}</div><span className={`pill ${r.urgency==="high"?"p-r":r.urgency==="medium"?"p-a":"p-gr"}`}>{UL[r.urgency||"medium"]}</span></div>{r.location&&<div className="mm">{r.location}</div>}{r.description&&<div className="md">{r.description}</div>}</div>)}</div>)}
+        {tab==="me"&&(me.length===0?<div className="es"><div className="esi">📤</div><div className="est">还没有发布</div></div>:<div className="card card-p0">{me.map((s,i)=><div key={i} className="mi"><div className="rb"><div><div className="mn">{s.name}</div><div className="mm">{CL[s.category||""]||s.category}{s.location?` · ${s.location}`:""}</div></div><span className={`pill ${s.status==="active"?"p-g":"p-gr"}`}>{s.status==="active"?"上架中":"已下架"}</span></div></div>)}</div>)}
+      </>}
+      {shS&&<Modal title="发布技能" onClose={()=>setShS(false)} footer={<><button className="btn btn-g" onClick={()=>setShS(false)}>取消</button><button className="btn btn-p" onClick={pubS}>发布</button></>}>
+        <div className="field"><label>技能名称</label><input placeholder="例：母婴护理、营养咨询…" value={sf.name} onChange={e=>setSf(p=>({...p,name:e.target.value}))} autoFocus/></div>
+        <div className="field"><label>类别</label><select value={sf.category} onChange={e=>setSf(p=>({...p,category:e.target.value}))}><option value="education">教育</option><option value="childcare">育儿</option><option value="housekeeping">家政</option><option value="tech">技术</option><option value="other">其他</option></select></div>
+        <div className="field"><label>描述</label><textarea placeholder="简要介绍技能和经验…" value={sf.description} onChange={e=>setSf(p=>({...p,description:e.target.value}))}/></div>
+        <div className="field"><label>服务地点</label><input placeholder="线上 / 同城…" value={sf.location} onChange={e=>setSf(p=>({...p,location:e.target.value}))}/></div>
+        <div className="frow"><div className="field"><label>最低价（元）</label><input type="number" value={sf.priceMin} onChange={e=>setSf(p=>({...p,priceMin:e.target.value}))}/></div><div className="field"><label>最高价（元）</label><input type="number" value={sf.priceMax} onChange={e=>setSf(p=>({...p,priceMax:e.target.value}))}/></div></div>
+      </Modal>}
+      {shR&&<Modal title="发布求助" onClose={()=>setShR(false)} footer={<><button className="btn btn-g" onClick={()=>setShR(false)}>取消</button><button className="btn btn-p" onClick={pubR}>发布</button></>}>
+        <div className="field"><label>求助标题</label><input placeholder="需要什么帮助？" value={rf.title} onChange={e=>setRf(p=>({...p,title:e.target.value}))} autoFocus/></div>
+        <div className="field"><label>描述</label><textarea placeholder="详细说明需求…" value={rf.description} onChange={e=>setRf(p=>({...p,description:e.target.value}))}/></div>
+        <div className="frow"><div className="field"><label>地点</label><input placeholder="线上/同城" value={rf.location} onChange={e=>setRf(p=>({...p,location:e.target.value}))}/></div><div className="field"><label>紧急程度</label><select value={rf.urgency} onChange={e=>setRf(p=>({...p,urgency:e.target.value}))}><option value="low">不急</option><option value="medium">一般</option><option value="high">紧急</option></select></div></div>
+      </Modal>}
+    </div>
+  );
+}
+
+// ─── Connections ──────────────────────────────────────────────────────────────
+function Connections(){
+  const [tab,setTab]=useState<"friends"|"search"|"requests">("friends");
+  const [friends,setFriends]=useState<Friend[]>([]);
+  const [searchQ,setSearchQ]=useState("");
+  const [searchRes,setSearchRes]=useState<Friend[]>([]);
+  const [ld,setLd]=useState(false);const [searching,setSearching]=useState(false);
+  const [actionBusy,setActionBusy]=useState<number|null>(null);
+  const [toast,setToast]=useState("");
+  const showToast=(msg:string)=>{setToast(msg);setTimeout(()=>setToast(""),2500);};
+  const loadFriends=useCallback(async()=>{setLd(true);try{const r=await(api as any).connections?.list?.query()??[];setFriends(r);}catch{}setLd(false);},[]);
+  useEffect(()=>{loadFriends();},[loadFriends]);
+  const doSearch=async()=>{if(!searchQ.trim())return;setSearching(true);setSearchRes([]);try{const r=await(api as any).connections?.search?.query({q:searchQ.trim()})??[];setSearchRes(r);}catch{}setSearching(false);};
+  const addFriend=async(userId:number)=>{setActionBusy(userId);try{await(api as any).connections?.sendRequest?.mutate({toUserId:userId});showToast("好友请求已发送！");setSearchRes(prev=>prev.map(u=>u.id===userId?{...u,status:"pending"}:u));}catch(e:any){showToast(e?.message||"发送失败");}setActionBusy(null);};
+  const acceptFriend=async(userId:number)=>{setActionBusy(userId);try{await(api as any).connections?.acceptRequest?.mutate({fromUserId:userId});showToast("已添加好友！");loadFriends();}catch(e:any){showToast(e?.message||"操作失败");}setActionBusy(null);};
+  const removeFriend=async(userId:number)=>{if(!confirm("确定移除该好友吗？"))return;setActionBusy(userId);try{await(api as any).connections?.remove?.mutate({userId});setFriends(prev=>prev.filter(f=>f.id!==userId));}catch{}setActionBusy(null);};
+  const pendingReqs=friends.filter(f=>f.status==="pending_incoming");
+  const confirmedFriends=friends.filter(f=>f.status==="accepted");
+  return(
+    <div className="fu">
+      {toast&&<Toast msg={toast}/>}
+      <div className="pg-head"><div className="pg-t">人脉圈</div><div className="pg-s">与信任的朋友互相连接，共享育儿资源</div></div>
+      <div className="tabs">
+        <button className={`tab ${tab==="friends"?"on":""}`} onClick={()=>setTab("friends")}>好友{confirmedFriends.length>0?` (${confirmedFriends.length})`:""}</button>
+        <button className={`tab ${tab==="search"?"on":""}`} onClick={()=>setTab("search")}>搜索用户</button>
+        <button className={`tab ${tab==="requests"?"on":""}`} onClick={()=>setTab("requests")}>好友请求{pendingReqs.length>0?` (${pendingReqs.length})`:""}</button>
+      </div>
+      {tab==="friends"&&<div>
+        {ld?<Spin/>:confirmedFriends.length===0?<div className="es"><div className="esi">👥</div><div className="est">还没有好友</div><div className="esd">通过「搜索用户」添加你认识的朋友</div></div>:
+          confirmedFriends.map(f=>(<div key={f.id} className="user-row"><Av name={f.name} email={f.email} oid={f.openId} sz="md"/><div className="user-info"><div className="user-name">{f.name||f.email||"用户"}</div><div className="user-meta">{f.email} · 信用分 {f.creditScore??100}</div></div><button className="btn-icon" onClick={()=>removeFriend(f.id)} disabled={actionBusy===f.id}>移除</button></div>))
+        }
+      </div>}
+      {tab==="search"&&<div>
+        <div className="search-bar"><input className="search-inp" placeholder="搜索昵称或邮箱…" value={searchQ} onChange={e=>setSearchQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSearch()}/><button className="btn btn-p btn-sm" onClick={doSearch} disabled={searching}>{searching?"搜索中…":"搜索"}</button></div>
+        {searchRes.length===0&&!searching&&searchQ&&<div className="es" style={{padding:"24px 0"}}><div className="esi" style={{fontSize:28}}>🔍</div><div className="est">没有找到用户</div></div>}
+        {searchRes.map(u=>(<div key={u.id} className="user-row"><Av name={u.name} email={u.email} oid={u.openId} sz="md"/><div className="user-info"><div className="user-name">{u.name||"用户"}</div><div className="user-meta">{u.email} · 信用分 {u.creditScore??100}</div></div><div className="friend-status">{u.status==="accepted"?<span className="pill p-g">已是好友</span>:u.status==="pending"?<span className="pill p-gr">已发送</span>:<button className="btn-copy" style={{fontSize:11}} onClick={()=>addFriend(u.id)} disabled={actionBusy===u.id}>{actionBusy===u.id?"发送中…":"+ 加好友"}</button>}</div></div>))}
+      </div>}
+      {tab==="requests"&&<div>
+        {pendingReqs.length===0?<div className="es"><div className="esi">📩</div><div className="est">暂无好友请求</div></div>:
+          pendingReqs.map(f=>(<div key={f.id} className="user-row"><Av name={f.name} email={f.email} oid={f.openId} sz="md"/><div className="user-info"><div className="user-name">{f.name||"用户"}</div><div className="user-meta">{f.email}</div></div><div className="friend-status"><button className="btn-copy" style={{fontSize:11}} onClick={()=>acceptFriend(f.id)} disabled={actionBusy===f.id}>{actionBusy===f.id?"处理中…":"接受"}</button><button className="btn-icon" style={{fontSize:11}} onClick={()=>removeFriend(f.id)}>忽略</button></div></div>))
+        }
+      </div>}
+    </div>
+  );
+}
+
+// ─── Members (家庭成员管理) ────────────────────────────────────────────────────
+function Members({fam}:{fam:Family}){
+  const [members,setMembers]=useState<FamilyMember[]>([]);
+  const [ld,setLd]=useState(true);
+  const [show,setShow]=useState(false);const [editMem,setEditMem]=useState<FamilyMember|null>(null);
+  const [busy,setBusy]=useState(false);const [toast,setToast]=useState("");
+  const blank={name:"",relation:"",remark:"",birthday:"",role:"collaborator" as string};
+  const [f,setF]=useState(blank);
+  const showToast=(msg:string)=>{setToast(msg);setTimeout(()=>setToast(""),2500);};
+  const loadMembers=useCallback(async()=>{setLd(true);try{const r=await(api as any).family.members?.query({familyId:fam.id})??[];setMembers(r);}catch{}setLd(false);},[fam.id]);
+  useEffect(()=>{loadMembers();},[loadMembers]);
+  const openEdit=(m:FamilyMember)=>{setEditMem(m);setF({name:m.name||"",relation:m.relation||"",remark:m.remark||"",birthday:m.birthday||"",role:m.role});setShow(true);};
+  // openAdd: 这里是给"已加入家庭"的成员补充资料；新增成员仍需通过邀请码加入。
+  const openAdd=()=>{showToast("请用上方邀请码邀请家人加入，加入后再补充信息");};
+  const save=async()=>{
+    if(!editMem){setShow(false);return;}
+    setBusy(true);
+    try{
+      await(api as any).family.updateMember?.mutate({familyId:fam.id,userId:editMem.userId,relation:f.relation||undefined,remark:f.remark||undefined,birthday:f.birthday||undefined,role:f.role});
+      showToast("已更新成员信息");
+      loadMembers();setShow(false);
+    }catch(e:any){showToast(e?.message||"操作失败");}
     setBusy(false);
   };
-
-  return (
-    <div className="fade-up">
-      <div className="page-header">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div className="page-title">孩子档案</div>
-            <div className="page-subtitle">管理孕期信息与成长记录</div>
-          </div>
-          <button className="btn-outline btn-sm" onClick={() => setShowAdd(true)}>+ 添加</button>
+  const removeMember=async(userId:number)=>{if(!confirm("确定移除该成员吗？"))return;try{await(api as any).family.removeMember?.mutate({familyId:fam.id,userId});showToast("已移除成员");loadMembers();}catch(e:any){showToast(e?.message||"操作失败");}};
+  const ROLES:Record<string,string>={admin:"管理员",collaborator:"协作者",observer:"观察者",viewer:"观察者"};
+  const RELATIONS=["爸爸","妈妈","爷爷","奶奶","外公","外婆","叔叔","阿姨","姑姑","舅舅","月嫂","保姆","其他"];
+  return(
+    <div className="fu">
+      {toast&&<Toast msg={toast}/>}
+      <div className="pg-head"><div className="rb"><div><div className="pg-t">家庭成员</div><div className="pg-s">管理家庭成员信息与权限</div></div><button className="btn btn-o btn-sm" onClick={openAdd}>+ 添加成员</button></div></div>
+      {/* invite reminder */}
+      <div className="card" style={{marginBottom:16,background:"var(--sage-lt)",border:"1px solid var(--sage-mid)"}}>
+        <div style={{fontSize:12.5,color:"var(--sage)",fontWeight:500,marginBottom:4}}>📋 邀请家人加入</div>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,letterSpacing:3,color:"var(--ink)"}}>{fam.inviteCode}</div>
+          <button className="btn-copy" onClick={()=>{navigator.clipboard?.writeText(fam.inviteCode).catch(()=>{});showToast("邀请码已复制");}}>复制邀请码</button>
         </div>
+        <div style={{fontSize:11,color:"var(--ink3)",marginTop:4}}>将邀请码分享给家人，他们可以加入并看到家庭信息</div>
       </div>
-      {children.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "48px 0", color: "var(--c-ink3)" }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>👶</div>
-          <div style={{ fontSize: 15 }}>还没有孩子档案</div>
-          <div style={{ fontSize: 13, marginTop: 4 }}>点击「添加」开始记录</div>
-        </div>
-      ) : (
-        <div className="children-grid">
-          {children.map(c => {
-            const pg = calcCurrentPregnancyWeeks(c);
-            return (
-              <div key={c.id} className="child-card" style={{ cursor: "default" }}>
-                <div className="child-card-top">
-                  <div className="child-bubble" style={{ background: "var(--c-accent-light)", fontSize: 24 }}>
-                    {c.isMultiple ? "👫" : c.childOneGender === "girl" ? "👧" : "👦"}
-                  </div>
-                  <div>
-                    <div className="child-name">{c.childOneName && c.childTwoName ? `${c.childOneName} & ${c.childTwoName}` : c.nickname}</div>
-                    <div className="child-gender">{c.isMultiple ? "DCDA 双胎" : "单胎"}</div>
-                  </div>
-                </div>
-                {pg && (
-                  <div className="child-pregnancy">
-                    <div className="week-big">{pg.weeks}</div>
-                    <div className="week-label">周+{pg.days}天</div>
-                  </div>
-                )}
-                <div className="info-row">
-                  {c.eddInfo?.twin37w && <span className="pill pill-green">🎯 37w: {fmt(c.eddInfo.twin37w.toString())}</span>}
-                  {c.eddInfo?.edd && <span className="pill pill-amber">预产 {fmt(c.eddInfo.edd.toString())}</span>}
-                </div>
-                {c.notes && <div style={{ fontSize: 13, color: "var(--c-ink2)", marginTop: 10, padding: "8px 12px", background: "var(--c-surface2)", borderRadius: 8 }}>{c.notes}</div>}
+      {ld?<Spin/>:members.length===0?<div className="es"><div className="esi">👪</div><div className="est">还没有成员资料</div><div className="esd">可以为已加入的家人补充关系、备注等信息</div></div>:
+      <div className="card card-p0">
+        {members.map((m)=>(
+          <div key={m.userId} className="mem-row">
+            <Av name={m.name} email={m.email} oid={m.openId} sz="md"/>
+            <div className="mem-info">
+              <div className="mem-name">{m.name||m.email||"成员"}</div>
+              <div className="mem-sub">
+                {m.relation&&<span style={{marginRight:8}}>👤 {m.relation}</span>}
+                {m.birthday&&<span style={{marginRight:8}}>🎂 {fmt(m.birthday,{month:"long",day:"numeric"})}</span>}
+                {m.remark&&<span style={{color:"var(--ink3)"}}>· {m.remark}</span>}
               </div>
-            );
-          })}
-        </div>
-      )}
-
-      {showAdd && (
-        <div className="modal-overlay" onClick={() => setShowAdd(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">添加孩子</div>
-            {error && <AlertMsg type="error" msg={error} />}
-            <div className="field"><label>档案昵称（如：小星星）</label><input value={form.nickname} onChange={e => setForm(p => ({ ...p, nickname: e.target.value }))} /></div>
-            <div className="field">
-              <label>
-                <input type="checkbox" checked={form.isMultiple} onChange={e => setForm(p => ({ ...p, isMultiple: e.target.checked }))} style={{ marginRight: 8, width: "auto" }} />
-                双胎（DCDA）
-              </label>
+              <div className="mem-role"><span className={`pill ${m.role==="admin"?"p-g":"p-gr"}`}>{ROLES[m.role]||m.role}</span></div>
             </div>
-            {form.isMultiple ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <div className="field"><label>孩子一名字</label><input placeholder="空空" value={form.childOneName} onChange={e => setForm(p => ({ ...p, childOneName: e.target.value }))} /></div>
-                <div className="field"><label>孩子二名字</label><input placeholder="多多" value={form.childTwoName} onChange={e => setForm(p => ({ ...p, childTwoName: e.target.value }))} /></div>
-              </div>
-            ) : null}
-            <div className="field"><label>参考孕周日期（某天你 X 周几天）</label><input type="date" value={form.pregnancyRefDate} onChange={e => setForm(p => ({ ...p, pregnancyRefDate: e.target.value }))} /></div>
-            {form.pregnancyRefDate && (
-              <div className="field"><label>那天是第几周（如 8）</label><input type="number" value={form.pregnancyWeeksAtRef} onChange={e => setForm(p => ({ ...p, pregnancyWeeksAtRef: +e.target.value }))} /></div>
-            )}
-            <div className="field"><label>或：IVF 移植日期</label><input type="date" value={form.embryoTransferDate} onChange={e => setForm(p => ({ ...p, embryoTransferDate: e.target.value }))} /></div>
-            {form.embryoTransferDate && (
-              <div className="field"><label>胚胎几天（3/5/6天）</label><input type="number" value={form.embryoDay} onChange={e => setForm(p => ({ ...p, embryoDay: +e.target.value }))} /></div>
-            )}
-            <div className="field"><label>备注</label><input placeholder="DCDA 双胎确认 ✓" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} /></div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowAdd(false)}>取消</button>
-              <button className="btn-primary" onClick={addChild} disabled={busy}>{busy ? "添加中…" : "添加"}</button>
+            <div style={{display:"flex",gap:6,flexShrink:0}}>
+              <button className="btn-icon" onClick={()=>openEdit(m)}>编辑</button>
+              {m.role!=="admin"&&<button className="btn-icon" style={{color:"var(--rose)"}} onClick={()=>removeMember(m.userId)}>移除</button>}
             </div>
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Pregnancy Manual Page ────────────────────────────────────────────────────
-function ManualPage({ children }: { children: Child[] }) {
-  const child = children[0];
-  const pg = child ? calcCurrentPregnancyWeeks(child) : null;
-  const [tab, setTab] = useState<"timeline" | "items" | "emergency" | "contacts" | "team">("timeline");
-  const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>(() => {
-    try { return JSON.parse(localStorage.getItem("pinple_items") || "{}"); } catch { return {}; }
-  });
-  const [expanded, setExpanded] = useState<number | null>(0);
-
-  const toggleItem = (ci: number, ii: number) => {
-    const k = `${ci}-${ii}`;
-    setCheckedItems(p => { const n = { ...p, [k]: !p[k] }; localStorage.setItem("pinple_items", JSON.stringify(n)); return n; });
-  };
-  const total = ITEM_CHECKLIST.reduce((s, c) => s + c.items.length, 0);
-  const checked = Object.values(checkedItems).filter(Boolean).length;
-  const pct = Math.round((checked / total) * 100);
-
-  const TEAM = [
-    { role: "月嫂A（主）", duty: "负责空空全面护理", time: "24小时住家", color: "#4A6EA8" },
-    { role: "月嫂B（副）", duty: "负责多多全面护理", time: "24小时住家", color: "#C4732A" },
-    { role: "外婆", duty: "月子餐、家务、后勤", time: "长期", color: "#B88A2A" },
-    { role: "妈妈", duty: "母乳喂养、亲子互动", time: "恢复期", color: "#A3536B" },
-    { role: "爸爸", duty: "夜间协助、采购、对外", time: "全程", color: "#4A7C5F" },
-  ];
-
-  const emGroups = EMERGENCY_DATA.reduce((acc, e) => {
-    if (!acc[e.type]) acc[e.type] = [];
-    acc[e.type].push(e);
-    return acc;
-  }, {} as Record<string, typeof EMERGENCY_DATA>);
-
-  return (
-    <div className="fade-up">
-      <div className="page-header">
-        <div className="page-title">孕育手册</div>
-        <div className="page-subtitle">
-          {pg ? `当前 ${pg.weeks}周+${pg.days}天 · ` : ""}关键节点 · 待产清单 · 应急预案
-        </div>
-      </div>
-
-      <div className="tab-bar">
-        {[
-          { k: "timeline", l: "📅 孕期" },
-          { k: "items", l: `🛒 清单 ${pct}%` },
-          { k: "emergency", l: "🚨 应急" },
-          { k: "contacts", l: "📞 联系" },
-          { k: "team", l: "👥 团队" },
-        ].map(({ k, l }) => (
-          <button key={k} className={`tab-btn ${tab === k ? "active" : ""}`} onClick={() => setTab(k as any)}>{l}</button>
         ))}
-      </div>
-
-      {tab === "timeline" && (
-        <div>
-          {child && pg && (
-            <div className="card" style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 20 }}>
-              <div>
-                <div style={{ fontSize: 12, color: "var(--c-ink3)" }}>当前孕周</div>
-                <div style={{ fontFamily: "var(--ff-display)", fontSize: 36, fontWeight: 700, color: "var(--c-accent)", lineHeight: 1 }}>{pg.weeks}<span style={{ fontSize: 16 }}>周</span>+{pg.days}天</div>
-              </div>
-              {(child.eddInfo?.twin37w || child.eddInfo?.edd) && (
-                <div style={{ borderLeft: "1px solid var(--c-border)", paddingLeft: 20 }}>
-                  <div style={{ fontSize: 12, color: "var(--c-ink3)" }}>{child.isMultiple ? "双胎37周预产" : "预产期"}</div>
-                  <div style={{ fontFamily: "var(--ff-display)", fontSize: 22, fontWeight: 700, color: "var(--c-accent2)" }}>
-                    {fmtFull(child.eddInfo.twin37w?.toString() || child.eddInfo.edd?.toString())}
-                  </div>
-                  <div style={{ fontSize: 12, color: "var(--c-ink3)", marginTop: 2 }}>
-                    还有 {Math.max(0, daysUntil(child.eddInfo.twin37w?.toString() || child.eddInfo.edd?.toString()) || 0)} 天
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          <div className="timeline">
-            {PREGNANCY_TIMELINE.map((item, i) => {
-              const status = i === 0 ? "done" : i === 1 ? "current" : i === PREGNANCY_TIMELINE.length - 1 ? "target" : "upcoming";
-              return (
-                <div key={i} className="tl-item">
-                  <div className={`tl-dot ${status}`}>{status === "done" ? "✓" : status === "target" ? "♥" : ""}</div>
-                  <div className={`tl-card ${status}`}>
-                    <div className="tl-card-row">
-                      <span className="tl-title">{item.title}</span>
-                      <span className="tl-week">{item.week}</span>
-                    </div>
-                    <div className="tl-desc">{item.desc}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      </div>}
+      {show&&<Modal title={editMem?"编辑成员信息":"添加成员信息"} onClose={()=>setShow(false)} footer={<><button className="btn btn-g" onClick={()=>setShow(false)}>取消</button><button className="btn btn-p" onClick={save} disabled={busy}>{busy?"保存中…":"保存"}</button></>}>
+        {editMem&&<div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,padding:"10px 12px",background:"var(--s3)",borderRadius:"var(--r)"}}>
+          <Av name={editMem.name} email={editMem.email} oid={editMem.openId} sz="sm"/>
+          <div><div style={{fontSize:13,fontWeight:500,color:"var(--ink)"}}>{editMem.name||editMem.email||"成员"}</div><div style={{fontSize:11,color:"var(--ink3)"}}>{editMem.email}</div></div>
+        </div>}
+        <div className="field">
+          <label>关系</label>
+          <select value={f.relation} onChange={e=>setF(p=>({...p,relation:e.target.value}))}>
+            <option value="">请选择关系</option>
+            {RELATIONS.map(r=><option key={r} value={r}>{r}</option>)}
+          </select>
         </div>
-      )}
-
-      {tab === "items" && (
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{ fontSize: 13, color: "var(--c-ink3)" }}>{checked}/{total} 已准备</div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--c-accent)" }}>{pct}%</div>
-          </div>
-          <div className="progress-bar"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
-          {ITEM_CHECKLIST.map((cat, ci) => {
-            const catChecked = cat.items.filter((_, ii) => checkedItems[`${ci}-${ii}`]).length;
-            const isOpen = expanded === ci;
-            return (
-              <div key={ci} className="checklist-cat">
-                <div className="checklist-cat-header" onClick={() => setExpanded(isOpen ? null : ci)}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontSize: 18 }}>{cat.cat.split(" ")[0]}</span>
-                    <span className="checklist-cat-title">{cat.cat.split(" ").slice(1).join(" ")}</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span className="checklist-cat-prog">{catChecked}/{cat.items.length}</span>
-                    <span style={{ fontSize: 12, color: "var(--c-ink3)", transform: isOpen ? "rotate(180deg)" : "none", display: "inline-block", transition: "transform 0.2s" }}>▼</span>
-                  </div>
-                </div>
-                {isOpen && (
-                  <div className="checklist-items">
-                    {cat.items.map((item, ii) => {
-                      const k = `${ci}-${ii}`;
-                      return (
-                        <div key={ii} className="checklist-item" onClick={() => toggleItem(ci, ii)}>
-                          <div className={`check-box ${checkedItems[k] ? "checked" : ""}`}>{checkedItems[k] ? "✓" : ""}</div>
-                          <span className={`checklist-item-name ${checkedItems[k] ? "done" : ""}`}>{item}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+        <div className="field"><label>生日</label><input type="date" value={f.birthday} onChange={e=>setF(p=>({...p,birthday:e.target.value}))} placeholder="可选"/></div>
+        <div className="field"><label>备注</label><input placeholder="例：主要负责夜间照顾" value={f.remark} onChange={e=>setF(p=>({...p,remark:e.target.value}))}/></div>
+        <div className="field">
+          <label>角色权限</label>
+          <select value={f.role} onChange={e=>setF(p=>({...p,role:e.target.value}))}>
+            <option value="collaborator">协作者（可查看和操作）</option>
+            <option value="observer">观察者（只可查看）</option>
+            <option value="admin">管理员（完全权限）</option>
+          </select>
         </div>
-      )}
-
-      {tab === "emergency" && (
-        <div>
-          {Object.entries(emGroups).map(([type, items]) => (
-            <div key={type} className="em-section">
-              <div className="em-section-title">{type}</div>
-              {items.map((item, i) => (
-                <div key={i} className={`em-card ${item.level}`}>
-                  <span className="em-icon">{item.level === "critical" ? "🚨" : "⚠️"}</span>
-                  <div>
-                    <div className="em-symptom">{item.symptom}</div>
-                    <div className="em-action">{item.action}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-          <div className="card" style={{ background: "var(--c-accent-light)", border: "1px solid rgba(74,136,255,0.28)" }}>
-            <div style={{ fontWeight: 600, color: "var(--c-accent-soft)", marginBottom: 4 }}>📍 最近医院</div>
-            <div style={{ fontSize: 14, color: "var(--c-ink)" }}>南山区人民医院（南山医院）</div>
-            <div style={{ fontSize: 12, color: "var(--c-ink3)", marginTop: 3 }}>桃园路89号 · 急诊：0755-26553111</div>
-          </div>
-        </div>
-      )}
-
-      {tab === "contacts" && (
-        <div>
-          <div className="section-label">🚨 紧急联系</div>
-          <div className="card card-sm" style={{ padding: 0, marginBottom: 16 }}>
-            {CONTACTS.filter(c => c.urgent).map((c, i) => (
-              <a key={i} href={`tel:${c.phone}`} style={{ textDecoration: "none", display: "block" }}>
-                <div className="contact-card contact-urgent">
-                  <div><div className="contact-name">{c.role}</div><div className="contact-note">{c.note}</div></div>
-                  <div className="contact-phone">{c.phone}</div>
-                </div>
-              </a>
-            ))}
-          </div>
-          <div className="section-label">📋 其他联系人</div>
-          <div className="card card-sm" style={{ padding: 0 }}>
-            {CONTACTS.filter(c => !c.urgent).map((c, i) => (
-              <div key={i} className="contact-card">
-                <div><div className="contact-name">{c.role}</div><div className="contact-note">{c.note}</div></div>
-                <div className="contact-phone" style={{ color: "var(--c-ink2)" }}>{c.phone}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {tab === "team" && (
-        <div>
-          <div className="card card-sm" style={{ padding: 0 }}>
-            {TEAM.map((m, i) => (
-              <div key={i} className="team-card">
-                <div className="team-avatar-circle" style={{ background: m.color }}>{m.role.slice(0, 1)}</div>
-                <div className="team-info">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span className="team-role">{m.role}</span>
-                    <span className="team-time">{m.time}</span>
-                  </div>
-                  <div className="team-duty">{m.duty}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="card" style={{ marginTop: 16, background: "var(--c-amber-light)", border: "1px solid rgba(230,165,84,0.28)" }}>
-            <div style={{ fontWeight: 600, color: "var(--c-amber)", marginBottom: 8 }}>💡 月嫂选择提醒</div>
-            <div style={{ fontSize: 13, color: "var(--c-ink2)", lineHeight: 1.8 }}>
-              · 必须有双胎护理经验<br />
-              · 深圳金牌月嫂约 2.8-3.5万/月<br />
-              · 建议提前2-3个月预约
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>}
     </div>
   );
 }
 
-// ─── Tasks Page ───────────────────────────────────────────────────────────────
-function TasksPage({ family, children, tasks, onRefresh }: { family: Family; children: Child[]; tasks: RoutineTask[]; onRefresh: () => void }) {
-  const [busy, setBusy] = useState<number | null>(null);
-  const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ title: "", icon: "📋", color: "#4A7C5F", category: "other" as const, repeatRule: "daily" });
-
-  const checkin = async (taskId: number) => {
-    setBusy(taskId);
-    try {
-      await (trpc as any).tasks.checkin.mutate({ taskId });
-      onRefresh();
-    } catch {}
-    setBusy(null);
-  };
-
-  const addTask = async () => {
-    if (!form.title) return;
-    try {
-      await (trpc as any).tasks.create.mutate({ familyId: family.id, ...form });
-      onRefresh(); setShowAdd(false);
-    } catch {}
-  };
-
-  return (
-    <div className="fade-up">
-      <div className="page-header">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <div className="page-title">日常打卡</div>
-            <div className="page-subtitle">今日已打卡 {tasks.reduce((s, t) => s + t.todayCheckins, 0)} 次</div>
-          </div>
-          <button className="btn-outline btn-sm" onClick={() => setShowAdd(true)}>+ 添加任务</button>
+// ─── Profile ──────────────────────────────────────────────────────────────────
+function Profile({user,fam,theme,setTheme,onLogout,onSwitch,onNav}:{user:User;fam:Family;theme:string;setTheme:(t:"light"|"dark")=>void;onLogout:()=>void;onSwitch:()=>void;onNav:(p:string)=>void}){
+  return(
+    <div className="fu">
+      <div className="ph">
+        <Av name={user.name} email={user.email} oid={user.openId} sz="lg" />
+        <div className="pname">{user.name||"用户"}</div>
+        <div className="pmail">{user.email}</div>
+        <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:10}}>
+          <span className="pill p-g">信用分 {user.creditScore??100}</span>
+          <span className="pill p-gr">{fam.memberRole==="admin"?"管理员":fam.memberRole==="collaborator"?"协作者":"观察者"}</span>
         </div>
       </div>
-      {tasks.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "48px 0", color: "var(--c-ink3)" }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-          <div>还没有任务</div>
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
-          {tasks.map(t => (
-            <div key={t.id} className="card" style={{ borderTop: `3px solid ${t.color || "#4A7C5F"}` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{t.title}</div>
-                  <div style={{ fontSize: 11, color: "var(--c-ink3)", marginTop: 2 }}>{t.category === "feeding" ? "喂养" : t.category === "checkup" ? "检查" : t.category === "sleep" ? "睡眠" : t.category === "play" ? "运动" : "其他"}</div>
-                </div>
-                <span style={{ fontSize: 20 }}>{t.icon || "📋"}</span>
-              </div>
-              <div style={{ fontFamily: "var(--ff-display)", fontSize: 32, fontWeight: 700, color: "var(--c-ink)", marginBottom: 4 }}>{t.todayCheckins}</div>
-              <div style={{ fontSize: 11, color: "var(--c-ink3)", marginBottom: 12 }}>今日次数</div>
-              <button onClick={() => checkin(t.id)} disabled={busy === t.id}
-                style={{ width: "100%", padding: "9px", background: busy === t.id ? "var(--c-surface2)" : t.color || "var(--c-accent)", color: busy === t.id ? "var(--c-ink3)" : "white", border: "none", borderRadius: 8, fontFamily: "var(--ff-body)", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.12s" }}>
-                {busy === t.id ? "记录中…" : "✓ 打卡"}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      {showAdd && (
-        <div className="modal-overlay" onClick={() => setShowAdd(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">添加打卡任务</div>
-            <div className="field"><label>任务名称</label><input placeholder="例：体重记录" value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))} /></div>
-            <div className="field"><label>图标</label><input value={form.icon} onChange={e => setForm(p => ({ ...p, icon: e.target.value }))} /></div>
-            <div className="field"><label>颜色</label><input type="color" value={form.color} onChange={e => setForm(p => ({ ...p, color: e.target.value }))} style={{ height: 40 }} /></div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowAdd(false)}>取消</button>
-              <button className="btn-primary" onClick={addTask}>添加</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <div className="card card-p0" style={{marginBottom:12}}>
+        <div className="pr" onClick={onSwitch}><span className="pric">🏠</span><span className="prl">当前家庭</span><span className="prv">{fam.name}</span><span className="pra">›</span></div>
+        <div className="pr" onClick={()=>onNav("members")}><span className="pric">👪</span><span className="prl">家庭成员管理</span><span className="pra">›</span></div>
+        <div className="pr" onClick={()=>{navigator.clipboard?.writeText(fam.inviteCode).catch(()=>{});}}><span className="pric">🎟️</span><span className="prl">邀请码</span><span className="prv" style={{fontFamily:"monospace",letterSpacing:2}}>{fam.inviteCode}</span></div>
+      </div>
+      <div className="card card-p0" style={{marginBottom:12}}>
+        <div className="pr" onClick={()=>setTheme(theme==="light"?"dark":"light")}><span className="pric">{theme==="light"?"🌙":"☀️"}</span><span className="prl">{theme==="light"?"切换夜间模式":"切换白天模式"}</span><span className="prv">{theme==="light"?"深色":"浅色"}</span></div>
+        <div className="pr"><span className="pric">🔗</span><span className="prl">绑定 微信</span><span className="badge-s">即将上线</span></div>
+        <div className="pr"><span className="pric">🌟</span><span className="prl">信用体系</span><span className="badge-s">即将上线</span></div>
+      </div>
+      <div className="card card-p0" style={{marginBottom:16}}>
+        <div className="pr"><span className="pric">📖</span><span className="prl">关于拼朋友</span><span className="prv">v4.3</span><span className="pra">›</span></div>
+      </div>
+      <button className="btn btn-d" onClick={onLogout}>退出登录</button>
+      <div style={{height:24}}/>
     </div>
   );
 }
 
-// ─── Skills/Market Page ───────────────────────────────────────────────────────
-function MarketPage({ user }: { user: User }) {
-  const [tab, setTab] = useState<"skills" | "requests" | "mine">("skills");
-  const [skills, setSkills] = useState<any[]>([]);
-  const [requests, setRequests] = useState<any[]>([]);
-  const [mySkills, setMySkills] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showPublish, setShowPublish] = useState(false);
-  const [showRequest, setShowRequest] = useState(false);
-  const [sForm, setSForm] = useState({ name: "", category: "other", description: "", location: "", priceMin: "", priceMax: "" });
-  const [rForm, setRForm] = useState({ title: "", description: "", location: "", urgency: "medium" as const });
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const [s, r, m] = await Promise.all([
-        (trpc as any).skills.list.query({ limit: 20, offset: 0 }),
-        (trpc as any).helpRequests.list.query({ limit: 20, offset: 0 }),
-        (trpc as any).skills.mySkills.query(),
-      ]);
-      setSkills(s); setRequests(r); setMySkills(m);
-    } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const publishSkill = async () => {
-    if (!sForm.name) return;
-    try { await (trpc as any).skills.create.mutate(sForm); load(); setShowPublish(false); } catch (e: any) { alert(e?.message || "发布失败"); }
-  };
-  const publishRequest = async () => {
-    if (!rForm.title) return;
-    try { await (trpc as any).helpRequests.create.mutate(rForm); load(); setShowRequest(false); } catch (e: any) { alert(e?.message || "发布失败"); }
-  };
-
-  const CATS: Record<string, string> = { education: "教育", childcare: "育儿", housekeeping: "家政", tech: "技术", other: "其他" };
-
-  return (
-    <div className="fade-up">
-      <div className="page-header">
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <div className="page-title">技能市场</div>
-            <div className="page-subtitle">信任圈内发布/寻找技能服务</div>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn-outline btn-sm" onClick={() => setShowPublish(true)}>+ 发布技能</button>
-            <button className="btn-outline btn-sm" onClick={() => setShowRequest(true)}>+ 发布求助</button>
-          </div>
-        </div>
-      </div>
-      <div className="tab-bar">
-        <button className={`tab-btn ${tab === "skills" ? "active" : ""}`} onClick={() => setTab("skills")}>技能列表</button>
-        <button className={`tab-btn ${tab === "requests" ? "active" : ""}`} onClick={() => setTab("requests")}>求助列表</button>
-        <button className={`tab-btn ${tab === "mine" ? "active" : ""}`} onClick={() => setTab("mine")}>我的发布</button>
-      </div>
-      {loading ? <Spinner /> : (
-        <>
-          {tab === "skills" && (
-            skills.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无技能发布</div> :
-            <div className="card" style={{ padding: 0 }}>
-              {skills.map((s, i) => (
-                <div key={i} className="list-item">
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div>
-                      <div className="list-item-title">{s.name}</div>
-                      <div className="list-item-meta">{CATS[s.category] || s.category} {s.location ? `· ${s.location}` : ""}</div>
-                    </div>
-                    {(s.priceMin || s.priceMax) && <span className="pill pill-amber">¥{s.priceMin}~{s.priceMax}</span>}
-                  </div>
-                  {s.description && <div className="list-item-desc">{s.description}</div>}
-                </div>
-              ))}
-            </div>
-          )}
-          {tab === "requests" && (
-            requests.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无求助发布</div> :
-            <div className="card" style={{ padding: 0 }}>
-              {requests.map((r, i) => (
-                <div key={i} className="list-item">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <div className="list-item-title">{r.title}</div>
-                    <span className={`pill ${r.urgency === "high" ? "pill-rose" : r.urgency === "medium" ? "pill-amber" : "pill-green"}`}>
-                      {r.urgency === "high" ? "紧急" : r.urgency === "medium" ? "一般" : "不急"}
-                    </span>
-                  </div>
-                  <div className="list-item-meta">{r.location}</div>
-                  {r.description && <div className="list-item-desc">{r.description}</div>}
-                </div>
-              ))}
-            </div>
-          )}
-          {tab === "mine" && (
-            mySkills.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>还没有发布技能</div> :
-            <div className="card" style={{ padding: 0 }}>
-              {mySkills.map((s, i) => (
-                <div key={i} className="list-item">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <div className="list-item-title">{s.name}</div>
-                    <span className={`pill ${s.status === "active" ? "pill-green" : "pill-amber"}`}>{s.status === "active" ? "上架" : "下架"}</span>
-                  </div>
-                  <div className="list-item-meta">{s.category} {s.location ? `· ${s.location}` : ""}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-      {showPublish && (
-        <div className="modal-overlay" onClick={() => setShowPublish(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">发布技能</div>
-            <div className="field"><label>技能名称</label><input placeholder="例：月嫂服务" value={sForm.name} onChange={e => setSForm(p => ({ ...p, name: e.target.value }))} /></div>
-            <div className="field"><label>类别</label>
-              <select value={sForm.category} onChange={e => setSForm(p => ({ ...p, category: e.target.value }))} style={{ width: "100%", padding: "11px 14px", border: "1.5px solid var(--c-border2)", borderRadius: "var(--r)", fontFamily: "var(--ff-body)", fontSize: 15 }}>
-                <option value="education">教育</option><option value="childcare">育儿</option>
-                <option value="housekeeping">家政</option><option value="tech">技术</option><option value="other">其他</option>
-              </select>
-            </div>
-            <div className="field"><label>描述</label><input placeholder="简要描述你的技能" value={sForm.description} onChange={e => setSForm(p => ({ ...p, description: e.target.value }))} /></div>
-            <div className="field"><label>服务地点</label><input placeholder="例：深圳南山" value={sForm.location} onChange={e => setSForm(p => ({ ...p, location: e.target.value }))} /></div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <div className="field"><label>最低价（元）</label><input type="number" value={sForm.priceMin} onChange={e => setSForm(p => ({ ...p, priceMin: e.target.value }))} /></div>
-              <div className="field"><label>最高价（元）</label><input type="number" value={sForm.priceMax} onChange={e => setSForm(p => ({ ...p, priceMax: e.target.value }))} /></div>
-            </div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowPublish(false)}>取消</button>
-              <button className="btn-primary" onClick={publishSkill}>发布</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {showRequest && (
-        <div className="modal-overlay" onClick={() => setShowRequest(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">发布求助</div>
-            <div className="field"><label>求助标题</label><input placeholder="例：寻找有双胎经验的月嫂" value={rForm.title} onChange={e => setRForm(p => ({ ...p, title: e.target.value }))} /></div>
-            <div className="field"><label>描述</label><input placeholder="详细描述需求" value={rForm.description} onChange={e => setRForm(p => ({ ...p, description: e.target.value }))} /></div>
-            <div className="field"><label>地点</label><input placeholder="例：深圳南山" value={rForm.location} onChange={e => setRForm(p => ({ ...p, location: e.target.value }))} /></div>
-            <div className="field"><label>紧急程度</label>
-              <select value={rForm.urgency} onChange={e => setRForm(p => ({ ...p, urgency: e.target.value as any }))} style={{ width: "100%", padding: "11px 14px", border: "1.5px solid var(--c-border2)", borderRadius: "var(--r)", fontFamily: "var(--ff-body)", fontSize: 15 }}>
-                <option value="low">不急</option><option value="medium">一般</option><option value="high">紧急</option>
-              </select>
-            </div>
-            <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowRequest(false)}>取消</button>
-              <button className="btn-primary" onClick={publishRequest}>发布</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Profile Page ─────────────────────────────────────────────────────────────
-function ProfilePage({ user, family, onLogout, onSwitchFamily }: { user: User; family: Family; onLogout: () => void; onSwitchFamily: () => void }) {
-  const [creditScore, setCreditScore] = useState<number | null>(null);
-
-  useEffect(() => {
-    (trpc as any).users.me.query().then(() => {}).catch(() => {});
-  }, []);
-
-  const color = getAvatarColor(user.openId);
-  const initials = getInitials(user.name, user.email);
-
-  return (
-    <div className="fade-up">
-      <div className="profile-header">
-        <div className="profile-avatar-lg" style={{ background: color }}>{initials}</div>
-        <div className="profile-name">{user.name || "用户"}</div>
-        <div className="profile-email">{user.email}</div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 12, padding: 0 }}>
-        <div className="profile-row" onClick={onSwitchFamily}>
-          <span className="profile-row-icon">🏠</span>
-          <span className="profile-row-label">当前家庭</span>
-          <span className="profile-row-value">{family.name}</span>
-          <span className="profile-row-arrow">›</span>
-        </div>
-        <div className="profile-row">
-          <span className="profile-row-icon">🎖️</span>
-          <span className="profile-row-label">家庭邀请码</span>
-          <span className="profile-row-value" style={{ fontFamily: "monospace", letterSpacing: 1 }}>{family.inviteCode}</span>
-        </div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 12, padding: 0 }}>
-        <div className="profile-row">
-          <span className="profile-row-icon">🌟</span>
-          <span className="profile-row-label">信用分</span>
-          <span className="profile-row-value">100分</span>
-          <span className="profile-row-arrow">›</span>
-        </div>
-        <div className="profile-row">
-          <span className="profile-row-icon">🔗</span>
-          <span className="profile-row-label">绑定微信/Google</span>
-          <span className="new-badge">即将上线</span>
-        </div>
-        <div className="profile-row">
-          <span className="profile-row-icon">👥</span>
-          <span className="profile-row-label">人脉圈</span>
-          <span className="new-badge">即将上线</span>
-        </div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 12, padding: 0 }}>
-        <div className="profile-row">
-          <span className="profile-row-icon">📖</span>
-          <span className="profile-row-label">关于 Pinple</span>
-          <span className="profile-row-value">v4.0</span>
-          <span className="profile-row-arrow">›</span>
-        </div>
-        <a href="/api/oauth/callback?provider=google" style={{ textDecoration: "none", display: "block" }}>
-          <div className="profile-row">
-            <span className="profile-row-icon">G</span>
-            <span className="profile-row-label">切换 Google 登录</span>
-            <span className="profile-row-arrow">›</span>
-          </div>
-        </a>
-      </div>
-
-      <button className="btn-danger" onClick={onLogout}>退出登录</button>
-      <div style={{ height: 32 }} />
-    </div>
-  );
-}
-
-// ─── Main App ──────────────────────────────────────────────────────────────────
-const NAV_ITEMS = [
-  { id: "home", icon: "🏠", label: "首页" },
-  { id: "children", icon: "👶", label: "宝宝" },
-  { id: "manual", icon: "📖", label: "手册" },
-  { id: "tasks", icon: "✅", label: "打卡" },
-  { id: "market", icon: "🛍", label: "市场" },
-  { id: "profile", icon: "👤", label: "我的" },
+// ─── Sidebar & nav ────────────────────────────────────────────────────────────
+const NAV=[
+  {id:"home",ic:"🏠",l:"首页"},
+  {id:"children",ic:"👶",l:"宝宝档案"},
+  {id:"manual",ic:"📖",l:"孕育手册"},
+  {id:"tasks",ic:"✅",l:"日常打卡"},
+  {id:"market",ic:"🛍",l:"技能市场"},
+  {id:"connections",ic:"👥",l:"人脉圈"},
+  {id:"members",ic:"👪",l:"家庭成员"},
+  {id:"profile",ic:"👤",l:"我的"},
 ];
+const MTABS=[
+  {id:"home",ic:"🏠",l:"首页"},
+  {id:"children",ic:"👶",l:"宝宝"},
+  {id:"manual",ic:"📖",l:"手册"},
+  {id:"tasks",ic:"✅",l:"打卡"},
+  {id:"connections",ic:"👥",l:"人脉"},
+  {id:"members",ic:"👪",l:"成员"},
+  {id:"profile",ic:"👤",l:"我的"},
+];
+const PTITLES:Record<string,string>={home:"首页",children:"宝宝档案",manual:"孕育手册",tasks:"日常打卡",market:"技能市场",connections:"人脉圈",members:"家庭成员",profile:"我的"};
 
-// ─── Error Boundary ───────────────────────────────────────────────────────────
-// Without this, any uncaught render error produces a totally blank page —
-// which is exactly the white screen the user hit.
-class AppErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  { error: Error | null }
-> {
-  constructor(props: { children: React.ReactNode }) {
-    super(props);
-    this.state = { error: null };
-  }
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error("[AppErrorBoundary]", error, info);
-    if (isAuthError(error)) {
-      handleAuthErrorOnce();
-    }
-  }
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="aura-boot">
-          <style>{CSS}</style>
-          <div className="aura-boot-inner">
-            <div className="aura-boot-badge">PINPLE · FAULT</div>
-            <div className="aura-boot-mark">pin<span>ple</span></div>
-            <div className="aura-boot-status" style={{ maxWidth: 420, textAlign: "center" }}>
-              应用加载出了点小问题。点下方按钮刷新页面重试。
-            </div>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "rgba(255,255,255,0.4)", maxWidth: 420, textAlign: "center", wordBreak: "break-word" }}>
-              {this.state.error.message || String(this.state.error)}
-            </div>
-            <button
-              className="auth-submit"
-              style={{ marginTop: 8, padding: "10px 28px", background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff", borderRadius: 999, fontFamily: "'Space Grotesk', sans-serif", cursor: "pointer" }}
-              onClick={() => window.location.reload()}
-            >
-              刷新重试
-            </button>
-          </div>
+function SB({fam,user,page,theme,setTheme,onNav,onSwitch}:{fam:Family;user:User;page:string;theme:string;setTheme:(t:"light"|"dark")=>void;onNav:(p:string)=>void;onSwitch:()=>void}){
+  return(
+    <>
+      <div className="sb-logo"><div className="logo">拼<em>朋友</em></div><div className="logo-sub">家庭管理 · 信任圈</div></div>
+      <div className="sb-fam" onClick={onSwitch}><div className="sb-fn">{fam.name}</div><div className="sb-fc">邀请码 {fam.inviteCode}</div></div>
+      <div className="sb-nav">
+        {NAV.map(n=>(<button key={n.id} className={`nb ${page===n.id?"on":""}`} onClick={()=>onNav(n.id)}><span className="nb-ic">{n.ic}</span>{n.l}</button>))}
+      </div>
+      <div className="sb-bot">
+        <ThemeToggle theme={theme} setTheme={setTheme}/>
+        <div className="uc" onClick={()=>onNav("profile")}>
+          <div className="av av-sm" style={{background:aColor(user.openId)}}>{ini(user.name,user.email)}</div>
+          <div style={{flex:1,minWidth:0}}><div className="un">{user.name||"用户"}</div><div className="ue">{user.email||user.openId}</div></div>
         </div>
-      );
-    }
-    return this.props.children;
-  }
+      </div>
+    </>
+  );
 }
 
-function AppInner() {
-  const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [family, setFamily] = useState<Family | null>(null);
-  const [children, setChildren] = useState<Child[]>([]);
-  const [tasks, setTasks] = useState<RoutineTask[]>([]);
-  const [page, setPage] = useState("home");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
-  const [bootElapsed, setBootElapsed] = useState(0);
-
-  // Auth check
-  useEffect(() => {
-    (trpc as any).auth.me.query().then((u: User | null) => setUser(u)).catch(() => setUser(null));
-  }, []);
-
-  // Track elapsed time during boot so we can surface a friendlier message on slow cold starts.
-  useEffect(() => {
-    if (user !== undefined) return;
-    const started = Date.now();
-    const timer = setInterval(() => setBootElapsed(Date.now() - started), 500);
-    return () => clearInterval(timer);
-  }, [user]);
-
-  // Load family data
-  const loadFamilyData = useCallback(async (fam: Family) => {
-    setLoadingData(true);
-    try {
-      const [kids, tks] = await Promise.all([
-        (trpc as any).children.list.query({ familyId: fam.id }),
-        (trpc as any).tasks.list.query({ familyId: fam.id }),
-      ]);
-      setChildren(kids);
-      setTasks(tks);
-    } catch {}
-    setLoadingData(false);
-  }, []);
-
-  useEffect(() => { if (family) loadFamilyData(family); }, [family]);
-
-  const handleLogout = async () => {
-    await (trpc as any).auth.logout.mutate();
-    setUser(null); setFamily(null);
-  };
-
-  // Loading state — shares the AURA look of the auth screen so the app feels cohesive.
-  if (user === undefined) {
-    const secs = Math.floor(bootElapsed / 1000);
-    const statusText =
-      secs < 4
-        ? "正在连接服务"
-        : secs < 10
-        ? "正在同步会话状态"
-        : secs < 20
-        ? "首次启动中，正在准备数据库"
-        : "仍在启动中，感谢你的耐心";
+// ─── Error boundary (prevents the white-screen-of-death) ─────────────────────
+class AppErrorBoundary extends Component<{children:ReactNode},{error:Error|null}>{
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(err:Error){ return { error: err }; }
+  componentDidCatch(error:Error,info:ErrorInfo){
+    console.error("[AppErrorBoundary]", error, info);
+    if (isAuthError(error)) handleAuthErrorOnce();
+  }
+  render(){
+    if (!this.state.error) return this.props.children;
+    const msg = (this.state.error as any)?.message ?? String(this.state.error);
     return (
-      <div className="aura-boot">
+      <div className="auth-s">
         <style>{CSS}</style>
-        <div className="aura-boot-inner">
-          <div className="aura-boot-badge">PINPLE · AURA SYSTEM</div>
-          <div className="aura-boot-mark">pin<span>ple</span></div>
-          <div className="aura-boot-bar" />
-          <div className="aura-boot-status">
-            {statusText}
-            <span className="aura-boot-dots"><span /><span /><span /></span>
+        <div className="auth-card fu">
+          <div className="auth-logo">
+            <div className="auth-brand">拼<em>朋友</em></div>
+            <div className="auth-tag">页面遇到了一个意外错误</div>
           </div>
-        </div>
-        <div className="aura-boot-footer">
-          BOOT · {String(secs).padStart(2, "0")}s ELAPSED
+          <div className="alert a-err" style={{marginBottom:14,wordBreak:"break-word"}}>{msg}</div>
+          <button className="btn btn-p btn-full" onClick={()=>window.location.reload()}>刷新重试</button>
+          <div style={{textAlign:"center",marginTop:10}}>
+            <button className="btn-link" onClick={()=>{handleAuthErrorOnce();}}>清除登录态并返回</button>
+          </div>
         </div>
       </div>
     );
   }
-
-  // Auth required
-  if (!user) return <AuthScreen onAuth={u => { setUser(u); }} />;
-
-  // Family required
-  if (!family) return <FamilySelector user={user} onSelect={f => setFamily(f)} />;
-
-  const renderPage = () => {
-    if (loadingData && (page === "home" || page === "children" || page === "tasks")) return <Spinner />;
-    switch (page) {
-      case "home": return <DashboardPage family={family} user={user} children={children} tasks={tasks} />;
-      case "children": return <ChildrenPage family={family} children={children} onRefresh={() => loadFamilyData(family)} />;
-      case "manual": return <ManualPage children={children} />;
-      case "tasks": return <TasksPage family={family} children={children} tasks={tasks} onRefresh={() => loadFamilyData(family)} />;
-      case "market": return <MarketPage user={user} />;
-      case "profile": return <ProfilePage user={user} family={family} onLogout={handleLogout} onSwitchFamily={() => setFamily(null)} />;
-      default: return <DashboardPage family={family} user={user} children={children} tasks={tasks} />;
-    }
-  };
-
-  const SidebarContent = () => (
-    <>
-      <div className="sidebar-logo">
-        <div className="logo-mark">pin<span>ple</span></div>
-        <div className="logo-sub">家庭管理 · 技能共享</div>
-      </div>
-      <div className="sidebar-family">
-        <div className="family-pill" onClick={() => { setFamily(null); setSidebarOpen(false); }}>
-          <div className="family-pill-name">{family.name}</div>
-          <div className="family-pill-code">邀请码 {family.inviteCode}</div>
-        </div>
-      </div>
-      <div className="sidebar-nav">
-        <div className="nav-section">
-          <div className="nav-section-label">主导航</div>
-          {NAV_ITEMS.map(item => (
-            <button key={item.id} className={`nav-item ${page === item.id ? "active" : ""}`}
-              onClick={() => { setPage(item.id); setSidebarOpen(false); }}>
-              <span className="nav-icon">{item.icon}</span>
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="sidebar-bottom">
-        <div className="user-chip" onClick={() => { setPage("profile"); setSidebarOpen(false); }}>
-          <div className="avatar" style={{ background: getAvatarColor(user.openId) }}>{getInitials(user.name, user.email)}</div>
-          <div className="user-info">
-            <div className="user-name">{user.name || "用户"}</div>
-            <div className="user-email">{user.email || user.openId}</div>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-
-  return (
-    <>
-      <style>{CSS}</style>
-      <div className="app-shell">
-        {/* Desktop Sidebar */}
-        <aside className="sidebar"><SidebarContent /></aside>
-
-        {/* Main */}
-        <div className="main-area">
-          <header className="topbar">
-            <button className="topbar-hamburger" onClick={() => setSidebarOpen(true)}>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
-            </button>
-            <div style={{ fontFamily: "var(--ff-display)", fontSize: 18, fontWeight: 700, color: "var(--c-ink)" }}>
-              {NAV_ITEMS.find(n => n.id === page)?.icon} {NAV_ITEMS.find(n => n.id === page)?.label}
-            </div>
-            <div className="avatar" style={{ background: getAvatarColor(user.openId), cursor: "pointer" }} onClick={() => setPage("profile")}>
-              {getInitials(user.name, user.email)}
-            </div>
-          </header>
-          <div style={{ flex: 1, overflowY: "auto" }}>
-            <div className="page-body">{renderPage()}</div>
-          </div>
-        </div>
-
-        {/* Mobile Bottom Nav */}
-        <nav className="mobile-nav">
-          <div className="mobile-nav-items">
-            {NAV_ITEMS.map(item => (
-              <button key={item.id} className={`mobile-nav-btn ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}>
-                <span className="mn-icon">{item.icon}</span>
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </div>
-        </nav>
-
-        {/* Mobile Sidebar Drawer */}
-        <div className={`mobile-sidebar ${sidebarOpen ? "open" : ""}`}>
-          <div className="mobile-overlay" onClick={() => setSidebarOpen(false)} />
-          <div className="mobile-drawer"><SidebarContent /></div>
-        </div>
-      </div>
-    </>
-  );
 }
 
-export default function App() {
-  // Top-level error boundary + global unhandled rejection interception.
-  // Any 401 that escapes a component (even from a forgotten .catch) now
-  // triggers an automatic logout+reload instead of a white screen.
-  useEffect(() => {
+// ─── Root ─────────────────────────────────────────────────────────────────────
+function AppInner(){
+  const [user,setUser]=useState<User|null|undefined>(undefined);
+  const [fam,setFam]=useState<Family|null>(null);
+  const [kids,setKids]=useState<Child[]>([]);
+  const [tasks,setTasks]=useState<Task[]>([]);
+  const [dld,setDld]=useState(false);
+  const [page,setPage]=useState("home");
+  const [drawer,setDrawer]=useState(false);
+  const [theme,setTheme]=useTheme();
+  const [resetToken] = useState<string|null>(()=>getQuery("reset_token"));
+
+  // Global unhandled-rejection handler — auth errors become a clean reload
+  useEffect(()=>{
     const onRejection = (ev: PromiseRejectionEvent) => {
       if (isAuthError(ev.reason)) {
         ev.preventDefault();
@@ -2446,11 +1194,97 @@ export default function App() {
     };
     window.addEventListener("unhandledrejection", onRejection);
     return () => window.removeEventListener("unhandledrejection", onRejection);
-  }, []);
+  },[]);
 
+  useEffect(()=>{
+    if (resetToken) { setUser(null); return; } // skip auth-me on reset flow
+    (api as any).auth.me.query()
+      .then((u:User|null)=>setUser(u))
+      .catch((e:any)=>{
+        if (isAuthError(e)) handleAuthErrorOnce();
+        setUser(null);
+      });
+  },[resetToken]);
+
+  const loadData=useCallback(async(f:Family)=>{
+    setDld(true);
+    try{const[k,t]=await Promise.all([(api as any).children.list.query({familyId:f.id}),(api as any).tasks.list.query({familyId:f.id})]);setKids(k??[]);setTasks(t??[]);}
+    catch(e){if(isAuthError(e)) handleAuthErrorOnce();}
+    setDld(false);
+  },[]);
+
+  useEffect(()=>{if(fam)loadData(fam);},[fam,loadData]);
+
+  const logout=async()=>{try{await(api as any).auth.logout.mutate();}catch{}setUser(null);setFam(null);};
+  const switchFam=()=>{setFam(null);setPage("home");};
+  const nav=(p:string)=>{setPage(p);setDrawer(false);};
+
+  // /?reset_token=... → show reset form
+  if (resetToken) {
+    return (<><style>{CSS}</style><ResetPasswordScreen token={resetToken} onDone={()=>{
+      // Clear ?reset_token from URL and re-fetch user (resetPassword auto-signs us in)
+      window.history.replaceState({}, "", "/");
+      (api as any).auth.me.query().then((u:User|null)=>setUser(u)).catch(()=>setUser(null));
+    }}/></>);
+  }
+
+  if(user===undefined)return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",flexDirection:"column",gap:14,background:"var(--bg)"}}>
+      <style>{CSS}</style>
+      <div style={{fontFamily:"'Noto Serif SC',serif",fontSize:26,fontWeight:700,color:"var(--ink)"}}>拼<span style={{color:"var(--sage)"}}>朋友</span></div>
+      <div className="sp"/>
+    </div>
+  );
+
+  if(!user)return(<><style>{CSS}</style><AuthScreen onAuth={u=>setUser(u)}/></>);
+  if(!fam)return(<><style>{CSS}</style><FamSelect user={user} onSel={f=>setFam(f)}/></>);
+
+  const renderPage=()=>{
+    if(dld&&["home","children","tasks"].includes(page))return <Spin/>;
+    switch(page){
+      case"home":return <Dashboard fam={fam} kids={kids} tasks={tasks} onNav={nav}/>;
+      case"children":return <Children fam={fam} kids={kids} onRefresh={()=>loadData(fam)}/>;
+      case"manual":return <Manual kids={kids}/>;
+      case"tasks":return <Tasks fam={fam} tasks={tasks} onRefresh={()=>loadData(fam)}/>;
+      case"market":return <Market/>;
+      case"connections":return <Connections/>;
+      case"members":return <Members fam={fam}/>;
+      case"profile":return <Profile user={user} fam={fam} theme={theme} setTheme={setTheme} onLogout={logout} onSwitch={switchFam} onNav={nav}/>;
+      default:return <Dashboard fam={fam} kids={kids} tasks={tasks} onNav={nav}/>;
+    }
+  };
+
+  return(
+    <>
+      <style>{CSS}</style>
+      <div className="app">
+        <aside className="sb"><SB fam={fam} user={user} page={page} theme={theme} setTheme={setTheme} onNav={nav} onSwitch={switchFam}/></aside>
+        <div className="main">
+          <header className="topbar">
+            <button className="ham" onClick={()=>setDrawer(true)} aria-label="打开菜单">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <div style={{fontFamily:"var(--ff-s)",fontSize:15,fontWeight:600,color:"var(--ink)"}} className="tb-title">{PTITLES[page]||""}</div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div onClick={()=>nav("profile")} style={{cursor:"pointer"}}><Av name={user.name} email={user.email} oid={user.openId} sz="sm"/></div>
+            </div>
+          </header>
+          <div className="page-body"><div className="pi">{renderPage()}</div></div>
+        </div>
+        <nav className="mob-nav"><div className="mob-items">{MTABS.map(t=><button key={t.id} className={`mb ${page===t.id?"on":""}`} onClick={()=>nav(t.id)}><span className="mb-ic">{t.ic}</span><span className="mb-lb">{t.l}</span></button>)}</div></nav>
+        <div className={`drw ${drawer?"open":""}`}>
+          <div className="drw-bg" onClick={()=>setDrawer(false)}/>
+          <div className="drw-panel"><SB fam={fam} user={user} page={page} theme={theme} setTheme={setTheme} onNav={nav} onSwitch={switchFam}/></div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+export default function App(){
   return (
     <AppErrorBoundary>
-      <AppInner />
+      <AppInner/>
     </AppErrorBoundary>
   );
 }

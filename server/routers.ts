@@ -505,6 +505,36 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // v4.3 unified member info update (relation / remark / birthday / role).
+    // Admins may edit anyone; non-admins may only edit their own row.
+    updateMember: protectedProcedure
+      .input(z.object({
+        familyId: z.number(),
+        userId: z.number(),
+        relation: z.string().max(50).optional().nullable(),
+        remark: z.string().max(255).optional().nullable(),
+        birthday: z.string().optional().nullable(),
+        role: z.enum(["admin", "collaborator", "observer"]).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        const myRole = await getMemberRole(input.familyId, ctx.user.id);
+        const isAdmin = myRole?.role === "admin";
+        if (!isAdmin && input.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只有管理员可以修改其他成员信息" });
+        }
+        // Non-admins cannot escalate their own role
+        const role = isAdmin ? input.role : undefined;
+        const { updateFamilyMemberInfo } = await import("./db");
+        await updateFamilyMemberInfo(input.familyId, input.userId, {
+          relation: input.relation ?? undefined,
+          remark: input.remark ?? undefined,
+          birthday: input.birthday ?? undefined,
+          role,
+        });
+        return { success: true };
+      }),
+
     updateMemberDates: protectedProcedure
       .input(z.object({
         familyId: z.number(),
@@ -670,11 +700,13 @@ export const appRouter = router({
         childTwoName: z.string().optional().nullable(),
         childOneGender: z.enum(["girl", "boy", "unknown"]).optional(),
         childTwoGender: z.enum(["girl", "boy", "unknown"]).optional(),
+        notes: z.string().max(2000).optional().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
         await assertFamilyCollaboratorOrAdmin(input.familyId, ctx.user.id);
         const childId = await createChild({
           ...input,
+          notes: input.notes ?? undefined,
           birthDate: input.birthDate ? new Date(input.birthDate) : undefined,
           embryoTransferDate: input.embryoTransferDate ? new Date(input.embryoTransferDate) : undefined,
           pregnancyRefDate: input.pregnancyRefDate ? new Date(input.pregnancyRefDate) : undefined,
@@ -1117,56 +1149,114 @@ export const appRouter = router({
   }),
   // ─── Connections (人脉好友) ────────────────────────────────────────────
   connections: router({
+    /**
+     * v4.3-friendly listing: returns BOTH accepted friends and pending incoming
+     * requests in one flat array, each carrying a `status` field that the new
+     * UI uses to bucket entries:
+     *   - "accepted"          (mutual friend)
+     *   - "pending_incoming"  (someone asked to add me)
+     *   - "pending_outgoing"  (I asked to add someone)
+     */
     list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getMyConnections(ctx.user.id);
-      // Resolve the "other" user in each connection
-      // When I am the requester, my friend is the receiver; when I am the receiver, my friend is the requester
-      return rows.map((r) => {
-        const isMeRequester = r.requesterId === ctx.user.id;
-        const friendId = isMeRequester ? r.receiverId : r.requesterId;
-        const friendName = isMeRequester ? r.receiverName : r.requesterName;
-        const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
-        // Check mutual: both directions accepted means isMutual
-        return {
-          id: r.id,
-          note: r.note,
-          category: r.category,
-          hasUpdate: r.hasUpdate,
-          createdAt: r.createdAt,
-          requesterId: r.requesterId,
-          receiverId: r.receiverId,
-          friendId,
-          friend: {
+      const accepted = await getMyConnections(ctx.user.id);
+      const acceptedItems = await Promise.all(
+        accepted.map(async (r) => {
+          const isMeRequester = r.requesterId === ctx.user.id;
+          const friendId = isMeRequester ? r.receiverId : r.requesterId;
+          const friendName = isMeRequester ? r.receiverName : r.requesterName;
+          const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
+          const friendUser = await getUserByUserId(friendId);
+          return {
             id: friendId,
-            name: friendName,
-            avatarUrl: friendAvatar,
-          },
-          isMeRequester,
-          isMutual: false, // computed separately via statusWith
-        };
-      });
+            connectionId: r.id,
+            name: friendName ?? friendUser?.name ?? null,
+            email: friendUser?.email ?? null,
+            avatarUrl: friendAvatar ?? friendUser?.avatarUrl ?? null,
+            openId: friendUser?.openId ?? "",
+            creditScore: (friendUser as any)?.creditScore ?? 100,
+            status: "accepted" as const,
+            note: r.note,
+            category: r.category,
+            createdAt: r.createdAt,
+          };
+        })
+      );
+
+      const pending = await getPendingRequests(ctx.user.id);
+      const pendingItems = await Promise.all(
+        pending.map(async (p) => {
+          const u = await getUserByUserId(p.requesterId);
+          return {
+            id: p.requesterId,
+            connectionId: p.id,
+            name: p.requesterName ?? u?.name ?? null,
+            email: u?.email ?? null,
+            avatarUrl: p.requesterAvatar ?? u?.avatarUrl ?? null,
+            openId: u?.openId ?? "",
+            creditScore: (u as any)?.creditScore ?? 100,
+            status: "pending_incoming" as const,
+            note: p.note,
+            category: null,
+            createdAt: p.createdAt,
+          };
+        })
+      );
+
+      return [...pendingItems, ...acceptedItems];
     }),
     pending: protectedProcedure.query(async ({ ctx }) => {
       return getPendingRequests(ctx.user.id);
     }),
     sendRequest: protectedProcedure
+      // Accept both the legacy {receiverId} and the v4.3 {toUserId} shape.
       .input(z.object({
-        receiverId: z.number(),
+        receiverId: z.number().optional(),
+        toUserId: z.number().optional(),
         note: z.string().max(200).optional(),
+      }).refine((d) => d.receiverId != null || d.toUserId != null, {
+        message: "缺少 receiverId / toUserId",
       }))
       .mutation(async ({ ctx, input }) => {
-        if (input.receiverId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "不能添加自己" });
-        const existing = await checkExistingConnection(ctx.user.id, input.receiverId);
+        const target = (input.receiverId ?? input.toUserId)!;
+        if (target === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "不能添加自己" });
+        const existing = await checkExistingConnection(ctx.user.id, target);
         if (existing) throw new TRPCError({ code: "CONFLICT", message: "已存在连接或请求" });
-        const receiver = await getUserByUserId(input.receiverId);
+        const receiver = await getUserByUserId(target);
         if (!receiver) throw new TRPCError({ code: "NOT_FOUND", message: "用户不存在" });
-        const id = await sendConnectionRequest(ctx.user.id, input.receiverId, input.note);
+        const id = await sendConnectionRequest(ctx.user.id, target, input.note);
         return { id };
       }),
     accept: protectedProcedure
       .input(z.object({ connectionId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         await acceptConnection(input.connectionId, ctx.user.id);
+        return { success: true };
+      }),
+    // v4.3: accept by counter-party userId (frontend doesn't know connectionId)
+    acceptRequest: protectedProcedure
+      .input(z.object({ fromUserId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const conn = await checkExistingConnection(ctx.user.id, input.fromUserId);
+        if (!conn) throw new TRPCError({ code: "NOT_FOUND", message: "请求不存在" });
+        if (conn.receiverId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只有接收方可接受请求" });
+        }
+        await acceptConnection(conn.id, ctx.user.id);
+        return { success: true };
+      }),
+    // v4.3: remove a friend or cancel a request, by counter-party userId
+    remove: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const conn = await checkExistingConnection(ctx.user.id, input.userId);
+        if (!conn) return { success: true };
+        const { getDb } = await import("./db");
+        const db = await getDb();
+        if (db) {
+          const { connections } = await import("../drizzle/schema");
+          const { eq } = await import("drizzle-orm");
+          await db.delete(connections).where(eq(connections.id, conn.id));
+        }
         return { success: true };
       }),
     listWithCategory: protectedProcedure.query(async ({ ctx }) => {
@@ -1188,9 +1278,35 @@ export const appRouter = router({
         return { success: true };
       }),
     search: protectedProcedure
-      .input(z.object({ query: z.string().min(1) }))
+      // Accept either {query} (legacy) or {q} (v4.3 frontend) — at least one required.
+      .input(z.object({
+        query: z.string().optional(),
+        q: z.string().optional(),
+      }).transform((d) => ({ query: (d.query ?? d.q ?? "").trim() }))
+        .refine((d) => d.query.length > 0, { message: "请输入搜索关键字" }))
       .query(async ({ ctx, input }) => {
-        return searchUsersByName(input.query, ctx.user.id);
+        const matches = await searchUsersByName(input.query, ctx.user.id);
+        // Enrich each row with email + creditScore + relationship status so the
+        // v4.3 "搜索用户" tab can render an actionable list in one round-trip.
+        return Promise.all(
+          matches.map(async (u) => {
+            const full = await getUserByUserId(u.id);
+            const conn = await checkExistingConnection(ctx.user.id, u.id);
+            let status: "none" | "accepted" | "pending" = "none";
+            if (conn) {
+              status = conn.status === "accepted" ? "accepted" : "pending";
+            }
+            return {
+              id: u.id,
+              name: u.name ?? null,
+              email: full?.email ?? null,
+              avatarUrl: u.avatarUrl ?? null,
+              openId: u.openId,
+              creditScore: (full as any)?.creditScore ?? 100,
+              status,
+            };
+          })
+        );
       }),
 
     // Get connection status and mutual friends between me and another user

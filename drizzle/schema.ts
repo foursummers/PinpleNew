@@ -71,6 +71,9 @@ export const familyMembers = mysqlTable("family_members", {
   nickname: varchar("nickname", { length: 50 }),
   birthDate: timestamp("birthDate"),
   anniversaryDate: timestamp("anniversaryDate"), // e.g. wedding anniversary
+  // v4.3: relation (e.g. 爸爸/妈妈/月嫂) & free-form remark for member management UI
+  relation: varchar("relation", { length: 50 }),
+  remark: varchar("remark", { length: 255 }),
   joinedAt: timestamp("joinedAt").defaultNow().notNull(),
 });
 

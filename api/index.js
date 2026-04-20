@@ -235,6 +235,10 @@ CREATE TABLE \`user_blocks\` (
   \`createdAt\` timestamp NOT NULL DEFAULT (now()),
   CONSTRAINT \`user_blocks_id\` PRIMARY KEY(\`id\`)
 );
+--> statement-breakpoint
+ALTER TABLE \`family_members\` ADD COLUMN \`relation\` varchar(50);
+--> statement-breakpoint
+ALTER TABLE \`family_members\` ADD COLUMN \`remark\` varchar(255);
 `;
     ALL_BOOTSTRAP_SQL = [
       boring_nehzno_default,
@@ -344,6 +348,9 @@ var init_schema = __esm({
       birthDate: timestamp("birthDate"),
       anniversaryDate: timestamp("anniversaryDate"),
       // e.g. wedding anniversary
+      // v4.3: relation (e.g. 爸爸/妈妈/月嫂) & free-form remark for member management UI
+      relation: varchar("relation", { length: 50 }),
+      remark: varchar("remark", { length: 255 }),
       joinedAt: timestamp("joinedAt").defaultNow().notNull()
     });
     children = mysqlTable("children", {
@@ -726,6 +733,7 @@ __export(db_exports, {
   updateEvent: () => updateEvent,
   updateEventJoinRequestStatus: () => updateEventJoinRequestStatus,
   updateFamily: () => updateFamily,
+  updateFamilyMemberInfo: () => updateFamilyMemberInfo,
   updateFamilyName: () => updateFamilyName,
   updateHelpRequestStatus: () => updateHelpRequestStatus,
   updateMatchStatus: () => updateMatchStatus,
@@ -1024,9 +1032,34 @@ async function getFamilyMembers(familyId) {
   const result = [];
   for (const m of members) {
     const user = await getUserById(m.userId);
-    if (user) result.push({ ...m, user });
+    if (!user) continue;
+    const birthdayIso = m.birthDate ? new Date(m.birthDate).toISOString().slice(0, 10) : null;
+    result.push({
+      ...m,
+      user,
+      name: user.name ?? null,
+      email: user.email ?? null,
+      openId: user.openId,
+      avatarUrl: user.avatarUrl ?? null,
+      relation: m.relation ?? null,
+      remark: m.remark ?? null,
+      birthday: birthdayIso
+    });
   }
   return result;
+}
+async function updateFamilyMemberInfo(familyId, userId, data) {
+  const db = await getDb();
+  if (!db) return;
+  const set = {};
+  if (data.relation !== void 0) set.relation = data.relation;
+  if (data.remark !== void 0) set.remark = data.remark;
+  if (data.role !== void 0) set.role = data.role;
+  if (data.birthday !== void 0) {
+    set.birthDate = data.birthday ? new Date(data.birthday) : null;
+  }
+  if (Object.keys(set).length === 0) return;
+  await db.update(familyMembers).set(set).where(and(eq(familyMembers.familyId, familyId), eq(familyMembers.userId, userId)));
 }
 async function getMemberRole(familyId, userId) {
   const db = await getDb();
@@ -2692,6 +2725,32 @@ var appRouter = router({
       await removeFamilyMember(input.familyId, input.userId);
       return { success: true };
     }),
+    // v4.3 unified member info update (relation / remark / birthday / role).
+    // Admins may edit anyone; non-admins may only edit their own row.
+    updateMember: protectedProcedure.input(z2.object({
+      familyId: z2.number(),
+      userId: z2.number(),
+      relation: z2.string().max(50).optional().nullable(),
+      remark: z2.string().max(255).optional().nullable(),
+      birthday: z2.string().optional().nullable(),
+      role: z2.enum(["admin", "collaborator", "observer"]).optional()
+    })).mutation(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      const myRole = await getMemberRole(input.familyId, ctx.user.id);
+      const isAdmin = myRole?.role === "admin";
+      if (!isAdmin && input.userId !== ctx.user.id) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u7BA1\u7406\u5458\u53EF\u4EE5\u4FEE\u6539\u5176\u4ED6\u6210\u5458\u4FE1\u606F" });
+      }
+      const role = isAdmin ? input.role : void 0;
+      const { updateFamilyMemberInfo: updateFamilyMemberInfo2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+      await updateFamilyMemberInfo2(input.familyId, input.userId, {
+        relation: input.relation ?? void 0,
+        remark: input.remark ?? void 0,
+        birthday: input.birthday ?? void 0,
+        role
+      });
+      return { success: true };
+    }),
     updateMemberDates: protectedProcedure.input(z2.object({
       familyId: z2.number(),
       userId: z2.number(),
@@ -2831,11 +2890,13 @@ var appRouter = router({
       childOneName: z2.string().optional().nullable(),
       childTwoName: z2.string().optional().nullable(),
       childOneGender: z2.enum(["girl", "boy", "unknown"]).optional(),
-      childTwoGender: z2.enum(["girl", "boy", "unknown"]).optional()
+      childTwoGender: z2.enum(["girl", "boy", "unknown"]).optional(),
+      notes: z2.string().max(2e3).optional().nullable()
     })).mutation(async ({ ctx, input }) => {
       await assertFamilyCollaboratorOrAdmin(input.familyId, ctx.user.id);
       const childId = await createChild({
         ...input,
+        notes: input.notes ?? void 0,
         birthDate: input.birthDate ? new Date(input.birthDate) : void 0,
         embryoTransferDate: input.embryoTransferDate ? new Date(input.embryoTransferDate) : void 0,
         pregnancyRefDate: input.pregnancyRefDate ? new Date(input.pregnancyRefDate) : void 0
@@ -3187,50 +3248,103 @@ var appRouter = router({
   }),
   // ─── Connections (人脉好友) ────────────────────────────────────────────
   connections: router({
+    /**
+     * v4.3-friendly listing: returns BOTH accepted friends and pending incoming
+     * requests in one flat array, each carrying a `status` field that the new
+     * UI uses to bucket entries:
+     *   - "accepted"          (mutual friend)
+     *   - "pending_incoming"  (someone asked to add me)
+     *   - "pending_outgoing"  (I asked to add someone)
+     */
     list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getMyConnections(ctx.user.id);
-      return rows.map((r) => {
-        const isMeRequester = r.requesterId === ctx.user.id;
-        const friendId = isMeRequester ? r.receiverId : r.requesterId;
-        const friendName = isMeRequester ? r.receiverName : r.requesterName;
-        const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
-        return {
-          id: r.id,
-          note: r.note,
-          category: r.category,
-          hasUpdate: r.hasUpdate,
-          createdAt: r.createdAt,
-          requesterId: r.requesterId,
-          receiverId: r.receiverId,
-          friendId,
-          friend: {
+      const accepted = await getMyConnections(ctx.user.id);
+      const acceptedItems = await Promise.all(
+        accepted.map(async (r) => {
+          const isMeRequester = r.requesterId === ctx.user.id;
+          const friendId = isMeRequester ? r.receiverId : r.requesterId;
+          const friendName = isMeRequester ? r.receiverName : r.requesterName;
+          const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
+          const friendUser = await getUserByUserId(friendId);
+          return {
             id: friendId,
-            name: friendName,
-            avatarUrl: friendAvatar
-          },
-          isMeRequester,
-          isMutual: false
-          // computed separately via statusWith
-        };
-      });
+            connectionId: r.id,
+            name: friendName ?? friendUser?.name ?? null,
+            email: friendUser?.email ?? null,
+            avatarUrl: friendAvatar ?? friendUser?.avatarUrl ?? null,
+            openId: friendUser?.openId ?? "",
+            creditScore: friendUser?.creditScore ?? 100,
+            status: "accepted",
+            note: r.note,
+            category: r.category,
+            createdAt: r.createdAt
+          };
+        })
+      );
+      const pending = await getPendingRequests(ctx.user.id);
+      const pendingItems = await Promise.all(
+        pending.map(async (p) => {
+          const u = await getUserByUserId(p.requesterId);
+          return {
+            id: p.requesterId,
+            connectionId: p.id,
+            name: p.requesterName ?? u?.name ?? null,
+            email: u?.email ?? null,
+            avatarUrl: p.requesterAvatar ?? u?.avatarUrl ?? null,
+            openId: u?.openId ?? "",
+            creditScore: u?.creditScore ?? 100,
+            status: "pending_incoming",
+            note: p.note,
+            category: null,
+            createdAt: p.createdAt
+          };
+        })
+      );
+      return [...pendingItems, ...acceptedItems];
     }),
     pending: protectedProcedure.query(async ({ ctx }) => {
       return getPendingRequests(ctx.user.id);
     }),
     sendRequest: protectedProcedure.input(z2.object({
-      receiverId: z2.number(),
+      receiverId: z2.number().optional(),
+      toUserId: z2.number().optional(),
       note: z2.string().max(200).optional()
+    }).refine((d) => d.receiverId != null || d.toUserId != null, {
+      message: "\u7F3A\u5C11 receiverId / toUserId"
     })).mutation(async ({ ctx, input }) => {
-      if (input.receiverId === ctx.user.id) throw new TRPCError3({ code: "BAD_REQUEST", message: "\u4E0D\u80FD\u6DFB\u52A0\u81EA\u5DF1" });
-      const existing = await checkExistingConnection(ctx.user.id, input.receiverId);
+      const target = input.receiverId ?? input.toUserId;
+      if (target === ctx.user.id) throw new TRPCError3({ code: "BAD_REQUEST", message: "\u4E0D\u80FD\u6DFB\u52A0\u81EA\u5DF1" });
+      const existing = await checkExistingConnection(ctx.user.id, target);
       if (existing) throw new TRPCError3({ code: "CONFLICT", message: "\u5DF2\u5B58\u5728\u8FDE\u63A5\u6216\u8BF7\u6C42" });
-      const receiver = await getUserByUserId(input.receiverId);
+      const receiver = await getUserByUserId(target);
       if (!receiver) throw new TRPCError3({ code: "NOT_FOUND", message: "\u7528\u6237\u4E0D\u5B58\u5728" });
-      const id = await sendConnectionRequest(ctx.user.id, input.receiverId, input.note);
+      const id = await sendConnectionRequest(ctx.user.id, target, input.note);
       return { id };
     }),
     accept: protectedProcedure.input(z2.object({ connectionId: z2.number() })).mutation(async ({ ctx, input }) => {
       await acceptConnection(input.connectionId, ctx.user.id);
+      return { success: true };
+    }),
+    // v4.3: accept by counter-party userId (frontend doesn't know connectionId)
+    acceptRequest: protectedProcedure.input(z2.object({ fromUserId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const conn = await checkExistingConnection(ctx.user.id, input.fromUserId);
+      if (!conn) throw new TRPCError3({ code: "NOT_FOUND", message: "\u8BF7\u6C42\u4E0D\u5B58\u5728" });
+      if (conn.receiverId !== ctx.user.id) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u63A5\u6536\u65B9\u53EF\u63A5\u53D7\u8BF7\u6C42" });
+      }
+      await acceptConnection(conn.id, ctx.user.id);
+      return { success: true };
+    }),
+    // v4.3: remove a friend or cancel a request, by counter-party userId
+    remove: protectedProcedure.input(z2.object({ userId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const conn = await checkExistingConnection(ctx.user.id, input.userId);
+      if (!conn) return { success: true };
+      const { getDb: getDb2 } = await Promise.resolve().then(() => (init_db(), db_exports));
+      const db = await getDb2();
+      if (db) {
+        const { connections: connections2 } = await Promise.resolve().then(() => (init_schema(), schema_exports));
+        const { eq: eq2 } = await import("drizzle-orm");
+        await db.delete(connections2).where(eq2(connections2.id, conn.id));
+      }
       return { success: true };
     }),
     listWithCategory: protectedProcedure.query(async ({ ctx }) => {
@@ -3247,8 +3361,30 @@ var appRouter = router({
       await clearConnectionUpdate(input.connectionId);
       return { success: true };
     }),
-    search: protectedProcedure.input(z2.object({ query: z2.string().min(1) })).query(async ({ ctx, input }) => {
-      return searchUsersByName(input.query, ctx.user.id);
+    search: protectedProcedure.input(z2.object({
+      query: z2.string().optional(),
+      q: z2.string().optional()
+    }).transform((d) => ({ query: (d.query ?? d.q ?? "").trim() })).refine((d) => d.query.length > 0, { message: "\u8BF7\u8F93\u5165\u641C\u7D22\u5173\u952E\u5B57" })).query(async ({ ctx, input }) => {
+      const matches = await searchUsersByName(input.query, ctx.user.id);
+      return Promise.all(
+        matches.map(async (u) => {
+          const full = await getUserByUserId(u.id);
+          const conn = await checkExistingConnection(ctx.user.id, u.id);
+          let status = "none";
+          if (conn) {
+            status = conn.status === "accepted" ? "accepted" : "pending";
+          }
+          return {
+            id: u.id,
+            name: u.name ?? null,
+            email: full?.email ?? null,
+            avatarUrl: u.avatarUrl ?? null,
+            openId: u.openId,
+            creditScore: full?.creditScore ?? 100,
+            status
+          };
+        })
+      );
     }),
     // Get connection status and mutual friends between me and another user
     statusWith: protectedProcedure.input(z2.object({ targetUserId: z2.number() })).query(async ({ ctx, input }) => {
