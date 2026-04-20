@@ -2652,8 +2652,8 @@ var appRouter = router({
       await createRsvp({ eventId: welcomeEventId, guestName: "\u540C\u4E8B\u5C0F\u738B", status: "declined", note: "\u90A3\u5929\u6709\u51FA\u5DEE\uFF0C\u63D0\u524D\u9001\u4E0A\u795D\u798F\uFF01" });
       const existing = await getAllMilestoneTemplates();
       if (existing.length === 0) {
-        const { getDb: getDb2 } = await Promise.resolve().then(() => (init_db(), db_exports));
-        const db = await getDb2();
+        const { getDb: getDb3 } = await Promise.resolve().then(() => (init_db(), db_exports));
+        const db = await getDb3();
         if (db) {
           const { milestoneTemplates: milestoneTemplates2 } = await Promise.resolve().then(() => (init_schema(), schema_exports));
           await db.insert(milestoneTemplates2).values(DEFAULT_MILESTONES);
@@ -3576,7 +3576,6 @@ var appRouter = router({
 // server/vercel-handler.ts
 init_db();
 init_bootstrap_sql();
-import { sql as sql2 } from "drizzle-orm";
 import mysql2 from "mysql2/promise";
 var app = express();
 app.set("trust proxy", true);
@@ -3636,39 +3635,53 @@ app.get("/api/db-ping", async (_req, res) => {
     });
     return;
   }
-  let db;
+  let conn = null;
   try {
-    db = await getDb();
+    conn = await mysql2.createConnection(buildDbConfig(process.env.DATABASE_URL));
   } catch (err) {
+    const cause = err?.cause;
     res.status(500).json({
       ok: false,
-      stage: "getDb",
-      message: String(err?.message || err),
+      stage: "connect",
       code: err?.code,
-      elapsedMs: Date.now() - started,
-      ...diag
-    });
-    return;
-  }
-  if (!db) {
-    res.status(500).json({
-      ok: false,
-      stage: "getDb",
-      message: "drizzle returned null \u2014 pool creation failed internally. Check Vercel logs for '[Database] Failed to connect' line.",
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+      cause: cause ? {
+        code: cause.code,
+        errno: cause.errno,
+        message: String(cause.sqlMessage || cause.message || cause)
+      } : void 0,
       elapsedMs: Date.now() - started,
       ...diag
     });
     return;
   }
   try {
-    const result = await db.execute(sql2`SELECT 1 AS ok`);
+    const [rows] = await conn.query("SELECT 1 AS ok");
+    let usersColumns = null;
+    let tables = null;
+    try {
+      const [colRows] = await conn.query(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' ORDER BY ORDINAL_POSITION"
+      );
+      usersColumns = colRows;
+      const [tblRows] = await conn.query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
+      );
+      tables = tblRows;
+    } catch {
+    }
     res.json({
       ok: true,
       elapsedMs: Date.now() - started,
-      result: Array.isArray(result) ? result[0] : result,
+      result: Array.isArray(rows) ? rows[0] : rows,
+      usersColumns,
+      tables,
       ...diag
     });
   } catch (err) {
+    const cause = err?.cause;
     res.status(500).json({
       ok: false,
       stage: "query",
@@ -3676,9 +3689,21 @@ app.get("/api/db-ping", async (_req, res) => {
       errno: err?.errno,
       sqlState: err?.sqlState,
       message: String(err?.sqlMessage || err?.message || err),
+      cause: cause ? {
+        code: cause.code,
+        errno: cause.errno,
+        message: String(cause.sqlMessage || cause.message || cause)
+      } : void 0,
       elapsedMs: Date.now() - started,
       ...diag
     });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+      }
+    }
   }
 });
 app.get("/api/db-columns", async (_req, res) => {

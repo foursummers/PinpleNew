@@ -92,42 +92,61 @@ app.get("/api/db-ping", async (_req: Request, res: Response) => {
     return;
   }
 
-  // Stage 2: Can we get the drizzle client (this also triggers schema bootstrap)?
-  let db;
+  // Stage 2: Try a DIRECT mysql2 connection + SELECT 1. This bypasses drizzle
+  // so we can see the real driver-level error (auth failure, SSL handshake,
+  // network reset, etc.) rather than drizzle's generic "Failed query" wrap.
+  let conn: mysql.Connection | null = null;
   try {
-    db = await getDb();
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
   } catch (err: any) {
+    const cause = (err as any)?.cause;
     res.status(500).json({
       ok: false,
-      stage: "getDb",
-      message: String(err?.message || err),
+      stage: "connect",
       code: err?.code,
-      elapsedMs: Date.now() - started,
-      ...diag,
-    });
-    return;
-  }
-  if (!db) {
-    res.status(500).json({
-      ok: false,
-      stage: "getDb",
-      message: "drizzle returned null — pool creation failed internally. Check Vercel logs for '[Database] Failed to connect' line.",
+      errno: err?.errno,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+      cause: cause
+        ? {
+            code: cause.code,
+            errno: cause.errno,
+            message: String(cause.sqlMessage || cause.message || cause),
+          }
+        : undefined,
       elapsedMs: Date.now() - started,
       ...diag,
     });
     return;
   }
 
-  // Stage 3: Actually run a query
+  // Stage 3: Run SELECT 1 + a quick columns check on `users`
   try {
-    const result = await db.execute(sql`SELECT 1 AS ok`);
+    const [rows] = await conn.query("SELECT 1 AS ok");
+    let usersColumns: unknown = null;
+    let tables: unknown = null;
+    try {
+      const [colRows] = await conn.query(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' ORDER BY ORDINAL_POSITION",
+      );
+      usersColumns = colRows;
+      const [tblRows] = await conn.query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME",
+      );
+      tables = tblRows;
+    } catch {
+      /* optional */
+    }
     res.json({
       ok: true,
       elapsedMs: Date.now() - started,
-      result: Array.isArray(result) ? result[0] : result,
+      result: Array.isArray(rows) ? rows[0] : rows,
+      usersColumns,
+      tables,
       ...diag,
     });
   } catch (err: any) {
+    const cause = (err as any)?.cause;
     res.status(500).json({
       ok: false,
       stage: "query",
@@ -135,9 +154,24 @@ app.get("/api/db-ping", async (_req: Request, res: Response) => {
       errno: err?.errno,
       sqlState: err?.sqlState,
       message: String(err?.sqlMessage || err?.message || err),
+      cause: cause
+        ? {
+            code: cause.code,
+            errno: cause.errno,
+            message: String(cause.sqlMessage || cause.message || cause),
+          }
+        : undefined,
       elapsedMs: Date.now() - started,
       ...diag,
     });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 });
 
