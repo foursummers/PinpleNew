@@ -48,6 +48,7 @@ import {
   updateFamily,
   updateMemberDates,
   updateMemberRole,
+  syncMemberYearlyEvent,
   updateRoutineTask,
   updateUserBirthDate,
   updateUserProfile,
@@ -494,6 +495,18 @@ export const appRouter = router({
       .input(z.object({ familyId: z.number(), userId: z.number(), role: z.enum(["admin", "collaborator", "observer"]) }))
       .mutation(async ({ ctx, input }) => {
         await assertFamilyAdmin(input.familyId, ctx.user.id);
+        // 防止把最后一个 admin 降级为非 admin：会让家庭没有管理员
+        if (input.role !== "admin") {
+          const members = await getFamilyMembers(input.familyId);
+          const admins = members.filter((m: any) => m.role === "admin");
+          const isTargetAdmin = admins.some((m: any) => m.userId === input.userId);
+          if (isTargetAdmin && admins.length === 1) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "至少需要保留一名管理员，请先将管理员权限转让给其他成员",
+            });
+          }
+        }
         await updateMemberRole(input.familyId, input.userId, input.role);
         return { success: true };
       }),
@@ -502,6 +515,21 @@ export const appRouter = router({
       .input(z.object({ familyId: z.number(), userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         await assertFamilyAdmin(input.familyId, ctx.user.id);
+        // 防止移除最后一个 admin
+        const members = await getFamilyMembers(input.familyId);
+        const target = members.find((m: any) => m.userId === input.userId);
+        if (!target) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "该成员不存在" });
+        }
+        if (target.role === "admin") {
+          const admins = members.filter((m: any) => m.role === "admin");
+          if (admins.length === 1) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "不能移除最后一名管理员，请先转让管理员权限",
+            });
+          }
+        }
         await removeFamilyMember(input.familyId, input.userId);
         return { success: true };
       }),
@@ -520,11 +548,156 @@ export const appRouter = router({
         if (input.userId !== ctx.user.id && myRole?.role !== 'admin') {
           throw new TRPCError({ code: 'FORBIDDEN', message: '只有管理员可以修改其他成员信息' });
         }
+        const birthDate =
+          input.birthDate ? new Date(input.birthDate) :
+          input.birthDate === null ? null : undefined;
+        const anniversaryDate =
+          input.anniversaryDate ? new Date(input.anniversaryDate) :
+          input.anniversaryDate === null ? null : undefined;
         await updateMemberDates(input.familyId, input.userId, {
-          birthDate: input.birthDate ? new Date(input.birthDate) : input.birthDate === null ? null : undefined,
-          anniversaryDate: input.anniversaryDate ? new Date(input.anniversaryDate) : input.anniversaryDate === null ? null : undefined,
+          birthDate,
+          anniversaryDate,
           nickname: input.nickname,
         });
+
+        // 生日/纪念日年循环事件自动同步
+        const member = (await getFamilyMembers(input.familyId)).find(
+          (m: any) => m.userId === input.userId,
+        );
+        const displayName =
+          input.nickname ??
+          (member as any)?.nickname ??
+          (member as any)?.user?.name ??
+          "家人";
+        if (birthDate !== undefined) {
+          try {
+            await syncMemberYearlyEvent({
+              familyId: input.familyId,
+              userId: input.userId,
+              eventType: "birthday",
+              title: `${displayName} 的生日`,
+              date: birthDate,
+              createdBy: ctx.user.id,
+            });
+          } catch (err) {
+            console.warn("[family.updateMemberDates] sync birthday failed:", err);
+          }
+        }
+        if (anniversaryDate !== undefined) {
+          try {
+            await syncMemberYearlyEvent({
+              familyId: input.familyId,
+              userId: input.userId,
+              eventType: "anniversary",
+              title: `${displayName} 的纪念日`,
+              date: anniversaryDate,
+              createdBy: ctx.user.id,
+            });
+          } catch (err) {
+            console.warn("[family.updateMemberDates] sync anniversary failed:", err);
+          }
+        }
+
+        return { success: true };
+      }),
+
+    /**
+     * 统一的成员编辑接口：可在一次请求中改角色 + 昵称 + 生日 + 纪念日。
+     * 前端若已使用 updateMemberRole / updateMemberDates，可继续保留；本接口
+     * 用于简化 v4 成员管理页面的一次性提交。
+     */
+    updateMember: protectedProcedure
+      .input(z.object({
+        familyId: z.number(),
+        userId: z.number(),
+        role: z.enum(["admin", "collaborator", "observer"]).optional(),
+        nickname: z.string().optional().nullable(),
+        birthDate: z.string().optional().nullable(),
+        anniversaryDate: z.string().optional().nullable(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        const myRole = await getMemberRole(input.familyId, ctx.user.id);
+        const isSelf = input.userId === ctx.user.id;
+        const isAdmin = myRole?.role === "admin";
+
+        // 角色变更必须由 admin 完成
+        if (input.role !== undefined) {
+          if (!isAdmin) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "只有管理员可以修改角色" });
+          }
+          if (input.role !== "admin") {
+            const members = await getFamilyMembers(input.familyId);
+            const admins = members.filter((m: any) => m.role === "admin");
+            const isTargetAdmin = admins.some((m: any) => m.userId === input.userId);
+            if (isTargetAdmin && admins.length === 1) {
+              throw new TRPCError({
+                code: "FORBIDDEN",
+                message: "至少需要保留一名管理员",
+              });
+            }
+          }
+          await updateMemberRole(input.familyId, input.userId, input.role);
+        }
+
+        // 昵称/生日/纪念日可由本人或 admin 修改
+        if (
+          input.nickname !== undefined ||
+          input.birthDate !== undefined ||
+          input.anniversaryDate !== undefined
+        ) {
+          if (!isSelf && !isAdmin) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "只有管理员可以修改他人的信息",
+            });
+          }
+          const birthDate =
+            input.birthDate ? new Date(input.birthDate) :
+            input.birthDate === null ? null : undefined;
+          const anniversaryDate =
+            input.anniversaryDate ? new Date(input.anniversaryDate) :
+            input.anniversaryDate === null ? null : undefined;
+          await updateMemberDates(input.familyId, input.userId, {
+            birthDate,
+            anniversaryDate,
+            nickname: input.nickname,
+          });
+
+          const member = (await getFamilyMembers(input.familyId)).find(
+            (m: any) => m.userId === input.userId,
+          );
+          const displayName =
+            input.nickname ??
+            (member as any)?.nickname ??
+            (member as any)?.user?.name ??
+            "家人";
+          if (birthDate !== undefined) {
+            try {
+              await syncMemberYearlyEvent({
+                familyId: input.familyId,
+                userId: input.userId,
+                eventType: "birthday",
+                title: `${displayName} 的生日`,
+                date: birthDate,
+                createdBy: ctx.user.id,
+              });
+            } catch {}
+          }
+          if (anniversaryDate !== undefined) {
+            try {
+              await syncMemberYearlyEvent({
+                familyId: input.familyId,
+                userId: input.userId,
+                eventType: "anniversary",
+                title: `${displayName} 的纪念日`,
+                date: anniversaryDate,
+                createdBy: ctx.user.id,
+              });
+            } catch {}
+          }
+        }
+
         return { success: true };
       }),
 

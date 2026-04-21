@@ -720,6 +720,7 @@ __export(db_exports, {
   resetDb: () => resetDb,
   searchUsersByName: () => searchUsersByName,
   sendConnectionRequest: () => sendConnectionRequest,
+  syncMemberYearlyEvent: () => syncMemberYearlyEvent,
   unblockUser: () => unblockUser,
   updateChild: () => updateChild,
   updateChildDetails: () => updateChildDetails,
@@ -1614,6 +1615,38 @@ async function deleteMemberEvent(id, familyId) {
   if (!db) throw new Error("DB not available");
   const { memberEvents: memberEvents2 } = await Promise.resolve().then(() => (init_schema(), schema_exports));
   await db.delete(memberEvents2).where(and(eq(memberEvents2.id, id), eq(memberEvents2.familyId, familyId)));
+}
+async function syncMemberYearlyEvent(args) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const { memberEvents: memberEvents2 } = await Promise.resolve().then(() => (init_schema(), schema_exports));
+  const existing = await db.select().from(memberEvents2).where(
+    and(
+      eq(memberEvents2.familyId, args.familyId),
+      eq(memberEvents2.userId, args.userId),
+      eq(memberEvents2.eventType, args.eventType)
+    )
+  ).limit(1);
+  if (!args.date) {
+    if (existing[0]) {
+      await db.delete(memberEvents2).where(eq(memberEvents2.id, existing[0].id));
+    }
+    return { action: "deleted" };
+  }
+  if (existing[0]) {
+    await db.update(memberEvents2).set({ eventDate: args.date, title: args.title, isYearly: true }).where(eq(memberEvents2.id, existing[0].id));
+    return { action: "updated", id: existing[0].id };
+  }
+  const [result] = await db.insert(memberEvents2).values({
+    familyId: args.familyId,
+    userId: args.userId,
+    title: args.title,
+    eventType: args.eventType,
+    eventDate: args.date,
+    isYearly: true,
+    createdBy: args.createdBy
+  });
+  return { action: "inserted", id: result.insertId };
 }
 async function updateFamilyName(familyId, name) {
   const db = await getDb();
@@ -2869,11 +2902,36 @@ var appRouter = router({
     }),
     updateMemberRole: protectedProcedure.input(z2.object({ familyId: z2.number(), userId: z2.number(), role: z2.enum(["admin", "collaborator", "observer"]) })).mutation(async ({ ctx, input }) => {
       await assertFamilyAdmin(input.familyId, ctx.user.id);
+      if (input.role !== "admin") {
+        const members = await getFamilyMembers(input.familyId);
+        const admins = members.filter((m) => m.role === "admin");
+        const isTargetAdmin = admins.some((m) => m.userId === input.userId);
+        if (isTargetAdmin && admins.length === 1) {
+          throw new TRPCError3({
+            code: "FORBIDDEN",
+            message: "\u81F3\u5C11\u9700\u8981\u4FDD\u7559\u4E00\u540D\u7BA1\u7406\u5458\uFF0C\u8BF7\u5148\u5C06\u7BA1\u7406\u5458\u6743\u9650\u8F6C\u8BA9\u7ED9\u5176\u4ED6\u6210\u5458"
+          });
+        }
+      }
       await updateMemberRole(input.familyId, input.userId, input.role);
       return { success: true };
     }),
     removeMember: protectedProcedure.input(z2.object({ familyId: z2.number(), userId: z2.number() })).mutation(async ({ ctx, input }) => {
       await assertFamilyAdmin(input.familyId, ctx.user.id);
+      const members = await getFamilyMembers(input.familyId);
+      const target = members.find((m) => m.userId === input.userId);
+      if (!target) {
+        throw new TRPCError3({ code: "NOT_FOUND", message: "\u8BE5\u6210\u5458\u4E0D\u5B58\u5728" });
+      }
+      if (target.role === "admin") {
+        const admins = members.filter((m) => m.role === "admin");
+        if (admins.length === 1) {
+          throw new TRPCError3({
+            code: "FORBIDDEN",
+            message: "\u4E0D\u80FD\u79FB\u9664\u6700\u540E\u4E00\u540D\u7BA1\u7406\u5458\uFF0C\u8BF7\u5148\u8F6C\u8BA9\u7BA1\u7406\u5458\u6743\u9650"
+          });
+        }
+      }
       await removeFamilyMember(input.familyId, input.userId);
       return { success: true };
     }),
@@ -2889,11 +2947,126 @@ var appRouter = router({
       if (input.userId !== ctx.user.id && myRole?.role !== "admin") {
         throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u7BA1\u7406\u5458\u53EF\u4EE5\u4FEE\u6539\u5176\u4ED6\u6210\u5458\u4FE1\u606F" });
       }
+      const birthDate = input.birthDate ? new Date(input.birthDate) : input.birthDate === null ? null : void 0;
+      const anniversaryDate = input.anniversaryDate ? new Date(input.anniversaryDate) : input.anniversaryDate === null ? null : void 0;
       await updateMemberDates(input.familyId, input.userId, {
-        birthDate: input.birthDate ? new Date(input.birthDate) : input.birthDate === null ? null : void 0,
-        anniversaryDate: input.anniversaryDate ? new Date(input.anniversaryDate) : input.anniversaryDate === null ? null : void 0,
+        birthDate,
+        anniversaryDate,
         nickname: input.nickname
       });
+      const member = (await getFamilyMembers(input.familyId)).find(
+        (m) => m.userId === input.userId
+      );
+      const displayName = input.nickname ?? member?.nickname ?? member?.user?.name ?? "\u5BB6\u4EBA";
+      if (birthDate !== void 0) {
+        try {
+          await syncMemberYearlyEvent({
+            familyId: input.familyId,
+            userId: input.userId,
+            eventType: "birthday",
+            title: `${displayName} \u7684\u751F\u65E5`,
+            date: birthDate,
+            createdBy: ctx.user.id
+          });
+        } catch (err) {
+          console.warn("[family.updateMemberDates] sync birthday failed:", err);
+        }
+      }
+      if (anniversaryDate !== void 0) {
+        try {
+          await syncMemberYearlyEvent({
+            familyId: input.familyId,
+            userId: input.userId,
+            eventType: "anniversary",
+            title: `${displayName} \u7684\u7EAA\u5FF5\u65E5`,
+            date: anniversaryDate,
+            createdBy: ctx.user.id
+          });
+        } catch (err) {
+          console.warn("[family.updateMemberDates] sync anniversary failed:", err);
+        }
+      }
+      return { success: true };
+    }),
+    /**
+     * 统一的成员编辑接口：可在一次请求中改角色 + 昵称 + 生日 + 纪念日。
+     * 前端若已使用 updateMemberRole / updateMemberDates，可继续保留；本接口
+     * 用于简化 v4 成员管理页面的一次性提交。
+     */
+    updateMember: protectedProcedure.input(z2.object({
+      familyId: z2.number(),
+      userId: z2.number(),
+      role: z2.enum(["admin", "collaborator", "observer"]).optional(),
+      nickname: z2.string().optional().nullable(),
+      birthDate: z2.string().optional().nullable(),
+      anniversaryDate: z2.string().optional().nullable()
+    })).mutation(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      const myRole = await getMemberRole(input.familyId, ctx.user.id);
+      const isSelf = input.userId === ctx.user.id;
+      const isAdmin = myRole?.role === "admin";
+      if (input.role !== void 0) {
+        if (!isAdmin) {
+          throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u7BA1\u7406\u5458\u53EF\u4EE5\u4FEE\u6539\u89D2\u8272" });
+        }
+        if (input.role !== "admin") {
+          const members = await getFamilyMembers(input.familyId);
+          const admins = members.filter((m) => m.role === "admin");
+          const isTargetAdmin = admins.some((m) => m.userId === input.userId);
+          if (isTargetAdmin && admins.length === 1) {
+            throw new TRPCError3({
+              code: "FORBIDDEN",
+              message: "\u81F3\u5C11\u9700\u8981\u4FDD\u7559\u4E00\u540D\u7BA1\u7406\u5458"
+            });
+          }
+        }
+        await updateMemberRole(input.familyId, input.userId, input.role);
+      }
+      if (input.nickname !== void 0 || input.birthDate !== void 0 || input.anniversaryDate !== void 0) {
+        if (!isSelf && !isAdmin) {
+          throw new TRPCError3({
+            code: "FORBIDDEN",
+            message: "\u53EA\u6709\u7BA1\u7406\u5458\u53EF\u4EE5\u4FEE\u6539\u4ED6\u4EBA\u7684\u4FE1\u606F"
+          });
+        }
+        const birthDate = input.birthDate ? new Date(input.birthDate) : input.birthDate === null ? null : void 0;
+        const anniversaryDate = input.anniversaryDate ? new Date(input.anniversaryDate) : input.anniversaryDate === null ? null : void 0;
+        await updateMemberDates(input.familyId, input.userId, {
+          birthDate,
+          anniversaryDate,
+          nickname: input.nickname
+        });
+        const member = (await getFamilyMembers(input.familyId)).find(
+          (m) => m.userId === input.userId
+        );
+        const displayName = input.nickname ?? member?.nickname ?? member?.user?.name ?? "\u5BB6\u4EBA";
+        if (birthDate !== void 0) {
+          try {
+            await syncMemberYearlyEvent({
+              familyId: input.familyId,
+              userId: input.userId,
+              eventType: "birthday",
+              title: `${displayName} \u7684\u751F\u65E5`,
+              date: birthDate,
+              createdBy: ctx.user.id
+            });
+          } catch {
+          }
+        }
+        if (anniversaryDate !== void 0) {
+          try {
+            await syncMemberYearlyEvent({
+              familyId: input.familyId,
+              userId: input.userId,
+              eventType: "anniversary",
+              title: `${displayName} \u7684\u7EAA\u5FF5\u65E5`,
+              date: anniversaryDate,
+              createdBy: ctx.user.id
+            });
+          } catch {
+          }
+        }
+      }
       return { success: true };
     }),
     rename: protectedProcedure.input(z2.object({ familyId: z2.number(), name: z2.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {

@@ -1233,6 +1233,62 @@ export async function deleteMemberEvent(id: number, familyId: number) {
     .where(and(eq(memberEvents.id, id), eq(memberEvents.familyId, familyId)));
 }
 
+/**
+ * Idempotently sync a yearly member event for birthday/anniversary.
+ * If the user already has an entry of that eventType in the family, update
+ * its date; otherwise insert a new one. If `date` is null, delete any
+ * existing yearly entry of that type.
+ */
+export async function syncMemberYearlyEvent(args: {
+  familyId: number;
+  userId: number;
+  eventType: "birthday" | "anniversary";
+  title: string;
+  date: Date | null;
+  createdBy: number;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const { memberEvents } = await import("../drizzle/schema");
+  const existing = await db
+    .select()
+    .from(memberEvents)
+    .where(
+      and(
+        eq(memberEvents.familyId, args.familyId),
+        eq(memberEvents.userId, args.userId),
+        eq(memberEvents.eventType, args.eventType),
+      ),
+    )
+    .limit(1);
+
+  if (!args.date) {
+    if (existing[0]) {
+      await db.delete(memberEvents).where(eq(memberEvents.id, existing[0].id));
+    }
+    return { action: "deleted" as const };
+  }
+
+  if (existing[0]) {
+    await db
+      .update(memberEvents)
+      .set({ eventDate: args.date, title: args.title, isYearly: true })
+      .where(eq(memberEvents.id, existing[0].id));
+    return { action: "updated" as const, id: existing[0].id };
+  }
+
+  const [result] = await db.insert(memberEvents).values({
+    familyId: args.familyId,
+    userId: args.userId,
+    title: args.title,
+    eventType: args.eventType,
+    eventDate: args.date,
+    isYearly: true,
+    createdBy: args.createdBy,
+  });
+  return { action: "inserted" as const, id: (result as any).insertId as number };
+}
+
 // ─── Family Management ────────────────────────────────────────────────────────
 export async function updateFamilyName(familyId: number, name: string) {
   const db = await getDb();
