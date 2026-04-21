@@ -170,13 +170,29 @@ export async function getDb() {
 async function ensureSchema(_db: NonNullable<typeof _db>) {
   if (!process.env.DATABASE_URL) return;
 
-  const statements = getBootstrapStatements();
-  let conn: mysql.Connection | null = null;
   const startedAt = Date.now();
-  let applied = 0;
-  let skipped = 0;
+  let conn: mysql.Connection | null = null;
   try {
     conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
+
+    // Fast-path: if the DB already has the v4 columns we care about, skip the
+    // entire migration run. This turns typical cold starts from 10-20s into
+    // < 300ms and eliminates the tRPC batched-query ERR_CONNECTION_RESET that
+    // happens when cold-start + schema init + queries exceed maxDuration.
+    try {
+      await conn.query("SELECT `reportedCount`, `passwordHash` FROM `users` LIMIT 0");
+      // Table + critical columns exist → schema is healthy, skip everything.
+      console.log(
+        `[Database] ensureSchema fast-path: schema already healthy in ${Date.now() - startedAt}ms`,
+      );
+      return;
+    } catch {
+      // Fall through to full migration.
+    }
+
+    const statements = getBootstrapStatements();
+    let applied = 0;
+    let skipped = 0;
     for (const stmt of statements) {
       try {
         await conn.query(stmt);

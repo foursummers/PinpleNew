@@ -1,14 +1,25 @@
 /*
  * 全局 CSS 最小化重置。
- * 主要样式由 App.tsx 内的 <style>{CSS}</style> 注入。
+ * 主要样式由 App.tsx 内的 <style>{CSS}</style> 注入（AURA 深色主题）。
+ * 这里只负责：
+ *   1. 清零 html/body/#root 的 padding/margin
+ *   2. 给 html/body 一个与 AURA 同色的深色背景，避免首次渲染/SSR 白闪
+ *   3. 让 #root 背景透明，使 body 的深色（含 aura-glow）能完整显示
  */
 html,
-body,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: #05070C;
+  color: #E8ECF5;
+}
+
 #root {
   margin: 0;
   padding: 0;
   min-height: 100%;
-  background: #fafaf7;
+  background: transparent;
 }
 
 *,

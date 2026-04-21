@@ -819,13 +819,21 @@ async function getDb() {
 }
 async function ensureSchema(_db2) {
   if (!process.env.DATABASE_URL) return;
-  const statements = getBootstrapStatements();
-  let conn = null;
   const startedAt = Date.now();
-  let applied = 0;
-  let skipped = 0;
+  let conn = null;
   try {
     conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    try {
+      await conn.query("SELECT `reportedCount`, `passwordHash` FROM `users` LIMIT 0");
+      console.log(
+        `[Database] ensureSchema fast-path: schema already healthy in ${Date.now() - startedAt}ms`
+      );
+      return;
+    } catch {
+    }
+    const statements = getBootstrapStatements();
+    let applied = 0;
+    let skipped = 0;
     for (const stmt of statements) {
       try {
         await conn.query(stmt);
