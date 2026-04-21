@@ -284,6 +284,244 @@ app.get("/api/db-repair", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Admin: Data Migration (Phase 1) ─────────────────────────────────────────
+// Exposes backup/migrate/verify operations of scripts/migrate-data.mjs
+// over HTTP so they can be run against the live Vercel DB.
+// Protected by DB_REPAIR_SECRET (same as /api/db-repair).
+//   GET /api/admin/migrate?action=backup|migrate|verify|all&secret=...
+const BUSINESS_TABLES = [
+  "users",
+  "password_reset_tokens",
+  "families",
+  "family_members",
+  "children",
+  "timeline_events",
+  "routine_tasks",
+  "task_checkins",
+  "events",
+  "event_images",
+  "rsvps",
+  "milestone_templates",
+  "connections",
+  "event_join_requests",
+  "member_events",
+  "recommendations",
+  "skills",
+  "help_requests",
+  "skill_matches",
+  "reviews",
+] as const;
+
+async function tableExists(conn: mysql.Connection, tableName: string): Promise<boolean> {
+  const [rows] = await conn.query(
+    "SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+    [tableName],
+  );
+  return (rows as Array<{ c: number }>)[0].c > 0;
+}
+
+async function runBackup(conn: mysql.Connection) {
+  const tables: Record<string, number> = {};
+  const data: Record<string, unknown[]> = {};
+  let totalRows = 0;
+  for (const t of BUSINESS_TABLES) {
+    if (!(await tableExists(conn, t))) continue;
+    const [rows] = await conn.query(`SELECT * FROM \`${t}\``);
+    const list = rows as unknown[];
+    tables[t] = list.length;
+    data[t] = list;
+    totalRows += list.length;
+  }
+  return { backupAt: new Date().toISOString(), totalRows, tables, data };
+}
+
+async function runMigrate(conn: mysql.Connection) {
+  const results: Record<string, number | string> = {};
+
+  const [userUpdate] = await conn.query(`
+    UPDATE \`users\` SET
+      \`bio\`           = COALESCE(\`bio\`, ''),
+      \`location\`      = COALESCE(\`location\`, ''),
+      \`skillTags\`     = COALESCE(\`skillTags\`, '[]'),
+      \`creditScore\`   = COALESCE(\`creditScore\`, 100),
+      \`reportedCount\` = COALESCE(\`reportedCount\`, 0)
+    WHERE
+      \`bio\` IS NULL OR
+      \`location\` IS NULL OR
+      \`skillTags\` IS NULL OR
+      \`creditScore\` IS NULL OR
+      \`reportedCount\` IS NULL
+  `);
+  results.usersUpdated = (userUpdate as { affectedRows: number }).affectedRows;
+
+  if (await tableExists(conn, "connections")) {
+    const [connUpdate] = await conn.query(`
+      UPDATE \`connections\` SET
+        \`category\`  = COALESCE(\`category\`, 'life'),
+        \`hasUpdate\` = COALESCE(\`hasUpdate\`, 0)
+      WHERE \`category\` IS NULL OR \`hasUpdate\` IS NULL
+    `);
+    results.connectionsUpdated = (connUpdate as { affectedRows: number }).affectedRows;
+  }
+
+  return results;
+}
+
+async function runVerify(conn: mysql.Connection) {
+  const report: {
+    verifiedAt: string;
+    counts: Record<string, number | null>;
+    orphans: Record<string, number | string>;
+    v4FieldHealth: Record<string, number | string>;
+  } = {
+    verifiedAt: new Date().toISOString(),
+    counts: {},
+    orphans: {},
+    v4FieldHealth: {},
+  };
+
+  for (const t of BUSINESS_TABLES) {
+    if (!(await tableExists(conn, t))) {
+      report.counts[t] = null;
+      continue;
+    }
+    const [rows] = await conn.query(`SELECT COUNT(*) AS c FROM \`${t}\``);
+    report.counts[t] = (rows as Array<{ c: number }>)[0].c;
+  }
+
+  const orphanQueries: Record<string, string> = {
+    familyMembersWithoutFamily: `
+      SELECT COUNT(*) AS c FROM \`family_members\` fm
+      LEFT JOIN \`families\` f ON f.id = fm.familyId
+      WHERE f.id IS NULL
+    `,
+    familyMembersWithoutUser: `
+      SELECT COUNT(*) AS c FROM \`family_members\` fm
+      LEFT JOIN \`users\` u ON u.id = fm.userId
+      WHERE u.id IS NULL
+    `,
+    childrenWithoutFamily: `
+      SELECT COUNT(*) AS c FROM \`children\` c
+      LEFT JOIN \`families\` f ON f.id = c.familyId
+      WHERE f.id IS NULL
+    `,
+    timelineEventsWithoutChild: `
+      SELECT COUNT(*) AS c FROM \`timeline_events\` te
+      LEFT JOIN \`children\` c ON c.id = te.childId
+      WHERE c.id IS NULL
+    `,
+    routineTasksWithoutFamily: `
+      SELECT COUNT(*) AS c FROM \`routine_tasks\` rt
+      LEFT JOIN \`families\` f ON f.id = rt.familyId
+      WHERE f.id IS NULL
+    `,
+    eventsWithoutFamily: `
+      SELECT COUNT(*) AS c FROM \`events\` e
+      LEFT JOIN \`families\` f ON f.id = e.familyId
+      WHERE f.id IS NULL
+    `,
+    rsvpsWithoutEvent: `
+      SELECT COUNT(*) AS c FROM \`rsvps\` r
+      LEFT JOIN \`events\` e ON e.id = r.eventId
+      WHERE e.id IS NULL
+    `,
+    connectionsWithoutUser: `
+      SELECT COUNT(*) AS c FROM \`connections\` cn
+      LEFT JOIN \`users\` ur ON ur.id = cn.requesterId
+      LEFT JOIN \`users\` ue ON ue.id = cn.receiverId
+      WHERE ur.id IS NULL OR ue.id IS NULL
+    `,
+  };
+  for (const [key, sqlText] of Object.entries(orphanQueries)) {
+    try {
+      const [rows] = await conn.query(sqlText);
+      report.orphans[key] = (rows as Array<{ c: number }>)[0].c;
+    } catch (err: any) {
+      report.orphans[key] = `error: ${String(err?.message || err)}`;
+    }
+  }
+
+  const healthQueries: Record<string, string> = {
+    usersMissingBio: "SELECT COUNT(*) AS c FROM `users` WHERE `bio` IS NULL",
+    usersMissingSkillTags: "SELECT COUNT(*) AS c FROM `users` WHERE `skillTags` IS NULL",
+    usersMissingCreditScore: "SELECT COUNT(*) AS c FROM `users` WHERE `creditScore` IS NULL",
+    usersMissingReportedCount: "SELECT COUNT(*) AS c FROM `users` WHERE `reportedCount` IS NULL",
+  };
+  for (const [key, sqlText] of Object.entries(healthQueries)) {
+    try {
+      const [rows] = await conn.query(sqlText);
+      report.v4FieldHealth[key] = (rows as Array<{ c: number }>)[0].c;
+    } catch (err: any) {
+      report.v4FieldHealth[key] = `error: ${String(err?.message || err)}`;
+    }
+  }
+
+  return report;
+}
+
+app.get("/api/admin/migrate", async (req: Request, res: Response) => {
+  const required = process.env.DB_REPAIR_SECRET;
+  const given = (req.query.secret as string) || req.headers["x-repair-secret"];
+  if (required && given !== required) {
+    res.status(401).json({ ok: false, message: "Unauthorized" });
+    return;
+  }
+  if (!process.env.DATABASE_URL) {
+    res.status(500).json({ ok: false, message: "DATABASE_URL not set" });
+    return;
+  }
+
+  const action = String(req.query.action || "verify").toLowerCase();
+  const started = Date.now();
+  let conn: mysql.Connection | null = null;
+  try {
+    conn = await mysql.createConnection(buildDbConfig(process.env.DATABASE_URL));
+    const result: Record<string, unknown> = {
+      ok: true,
+      action,
+      startedAt: new Date(started).toISOString(),
+    };
+    switch (action) {
+      case "backup":
+        result.backup = await runBackup(conn);
+        break;
+      case "migrate":
+        result.migrate = await runMigrate(conn);
+        break;
+      case "verify":
+        result.verify = await runVerify(conn);
+        break;
+      case "all":
+        result.backup = await runBackup(conn);
+        result.migrate = await runMigrate(conn);
+        result.verify = await runVerify(conn);
+        break;
+      default:
+        res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
+        return;
+    }
+    result.elapsedMs = Date.now() - started;
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      action,
+      elapsedMs: Date.now() - started,
+      code: err?.code,
+      sqlState: err?.sqlState,
+      message: String(err?.sqlMessage || err?.message || err),
+    });
+  } finally {
+    if (conn) {
+      try {
+        await conn.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+});
+
 registerOAuthRoutes(app);
 
 app.use(
