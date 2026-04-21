@@ -2175,8 +2175,184 @@ function registerOAuthRoutes(app2) {
 
 // server/routers.ts
 import { TRPCError as TRPCError3 } from "@trpc/server";
-import { nanoid } from "nanoid";
+import { nanoid as nanoid2 } from "nanoid";
 import { z as z2 } from "zod";
+
+// server/_core/auto-generate.ts
+init_db();
+import { nanoid } from "nanoid";
+function addDays(d, days) {
+  const out = new Date(d.getTime());
+  out.setUTCDate(out.getUTCDate() + days);
+  return out;
+}
+function addMonths(d, months) {
+  const out = new Date(d.getTime());
+  out.setUTCMonth(out.getUTCMonth() + months);
+  return out;
+}
+function addYears(d, years) {
+  const out = new Date(d.getTime());
+  out.setUTCFullYear(out.getUTCFullYear() + years);
+  return out;
+}
+async function generatePregnancyEvents(input) {
+  if (!input.pregnancyRefDate) return 0;
+  const weeks = input.pregnancyWeeksAtRef ?? 0;
+  const days = input.pregnancyDaysAtRef ?? 0;
+  const lmp = addDays(input.pregnancyRefDate, -(weeks * 7 + days));
+  const implantation = addDays(lmp, 14);
+  const edd = addDays(lmp, 280);
+  const items = [
+    {
+      title: "\u672B\u6B21\u6708\u7ECF\uFF08LMP\uFF09",
+      content: `${input.nickname} \u7684\u5B55\u671F\u8D77\u70B9\uFF0C\u7528\u4E8E\u63A8\u7B97\u5B55\u5468\u3002`,
+      date: lmp
+    },
+    {
+      title: "\u9884\u8BA1\u7740\u5E8A\u65E5",
+      content: "\u53D7\u7CBE\u540E 7-10 \u5929\u7740\u5E8A\uFF0C\u7EA6\u4E3A LMP \u540E 14 \u5929\u3002",
+      date: implantation
+    }
+  ];
+  for (const wk of [8, 12, 16, 20, 24, 28, 32, 36]) {
+    items.push({
+      title: `\u5B55 ${wk} \u5468\u4EA7\u68C0`,
+      content: `\u5EFA\u8BAE\u5728 ${wk} \u5468\u524D\u540E\u5B8C\u6210\u4E00\u6B21\u5E38\u89C4\u4EA7\u68C0\u3002`,
+      date: addDays(lmp, wk * 7)
+    });
+  }
+  items.push({
+    title: "\u9884\u4EA7\u671F\uFF08EDD\uFF09",
+    content: "\u6839\u636E LMP \u63A8\u7B97\uFF1ALMP + 280 \u5929\u3002\u5B9E\u9645\u5206\u5A29\u65F6\u95F4\u4F1A\u6709 \xB12 \u5468\u6CE2\u52A8\u3002",
+    date: edd
+  });
+  let created = 0;
+  for (const it of items) {
+    await createTimelineEvent({
+      childId: input.childId,
+      familyId: input.familyId,
+      type: "pregnancy",
+      title: it.title,
+      content: it.content,
+      eventDate: it.date,
+      createdBy: input.createdBy,
+      isPublic: false
+    });
+    created++;
+  }
+  return created;
+}
+async function generateMilestoneEvents(input) {
+  if (!input.birthDate) return 0;
+  const b = input.birthDate;
+  const items = [
+    { title: "\u51FA\u751F", content: `${input.nickname} \u6765\u5230\u8FD9\u4E2A\u4E16\u754C\uFF01`, date: b },
+    { title: "\u6EE1\u6708", content: "\u5B9D\u5B9D\u6EE1\u6708\u5566\uFF01", date: addDays(b, 30) },
+    { title: "42\u5929\u4F53\u68C0", content: "\u4EA7\u540E 42 \u5929\u6BCD\u5A74\u5E38\u89C4\u590D\u67E5\u3002", date: addDays(b, 42) },
+    { title: "\u767E\u65E5", content: "\u5B9D\u5B9D 100 \u5929\u5566\uFF01", date: addDays(b, 100) },
+    { title: "3 \u4E2A\u6708", content: "3 \u6708\u9F84\u53D1\u80B2\u91CC\u7A0B\u7891\u3002", date: addMonths(b, 3) },
+    { title: "6 \u4E2A\u6708", content: "6 \u6708\u9F84\u53D1\u80B2\u91CC\u7A0B\u7891\u3002", date: addMonths(b, 6) },
+    { title: "9 \u4E2A\u6708", content: "9 \u6708\u9F84\u53D1\u80B2\u91CC\u7A0B\u7891\u3002", date: addMonths(b, 9) },
+    { title: "1 \u5468\u5C81", content: "\u7B2C\u4E00\u4E2A\u751F\u65E5\uFF01", date: addMonths(b, 12) },
+    { title: "1 \u5C81\u534A", content: "18 \u6708\u9F84\u53D1\u80B2\u91CC\u7A0B\u7891\u3002", date: addMonths(b, 18) },
+    { title: "2 \u5468\u5C81", content: "\u7B2C\u4E8C\u4E2A\u751F\u65E5\u3002", date: addMonths(b, 24) },
+    { title: "3 \u5468\u5C81", content: "\u7B2C\u4E09\u4E2A\u751F\u65E5\u3002", date: addMonths(b, 36) }
+  ];
+  for (const age of [4, 5, 6]) {
+    items.push({
+      title: `${age} \u5468\u5C81`,
+      content: `${input.nickname} ${age} \u5C81\u751F\u65E5\u5FEB\u4E50\uFF01`,
+      date: addYears(b, age)
+    });
+  }
+  let created = 0;
+  for (const it of items) {
+    await createTimelineEvent({
+      childId: input.childId,
+      familyId: input.familyId,
+      type: "milestone",
+      title: it.title,
+      content: it.content,
+      eventDate: it.date,
+      createdBy: input.createdBy,
+      isPublic: false
+    });
+    created++;
+  }
+  return created;
+}
+var DEFAULT_RSVP_ROLES = ["\u7238\u7238", "\u5988\u5988", "\u7237\u7237", "\u5976\u5976", "\u597D\u53CB"];
+async function generateWelcomeEvent(input) {
+  const eventDate = input.birthDate ? input.birthDate : addDays(/* @__PURE__ */ new Date(), 7);
+  const eventId = await createEvent({
+    familyId: input.familyId,
+    title: `\u6B22\u8FCE ${input.nickname}\uFF01`,
+    description: "\u7CFB\u7EDF\u81EA\u52A8\u521B\u5EFA\u7684\u6B22\u8FCE\u6D3B\u52A8\u3002\u53EF\u7F16\u8F91\u65F6\u95F4\u3001\u5730\u70B9\u540E\u5206\u4EAB\u7ED9\u4EB2\u53CB\u3002",
+    eventDate,
+    inviteToken: nanoid(12),
+    isPublic: false,
+    createdBy: input.createdBy
+  });
+  let rsvpCount = 0;
+  for (const role of DEFAULT_RSVP_ROLES) {
+    await createRsvp({
+      eventId,
+      guestName: role,
+      status: "maybe",
+      note: "\u7CFB\u7EDF\u9884\u8BBE RSVP\uFF0C\u7B49\u5F85\u5BB6\u4EBA\u786E\u8BA4"
+    });
+    rsvpCount++;
+  }
+  return { eventId, rsvpCount };
+}
+async function runChildAutoGeneration(input) {
+  const result = {
+    pregnancyEvents: 0,
+    milestoneEvents: 0,
+    welcomeEventId: null,
+    welcomeRsvps: 0,
+    errors: []
+  };
+  try {
+    result.pregnancyEvents = await generatePregnancyEvents({
+      childId: input.childId,
+      familyId: input.familyId,
+      createdBy: input.createdBy,
+      nickname: input.nickname,
+      pregnancyRefDate: input.pregnancyRefDate,
+      pregnancyWeeksAtRef: input.pregnancyWeeksAtRef,
+      pregnancyDaysAtRef: input.pregnancyDaysAtRef
+    });
+  } catch (err) {
+    result.errors.push({ step: "pregnancy", message: String(err?.message || err) });
+  }
+  try {
+    result.milestoneEvents = await generateMilestoneEvents({
+      childId: input.childId,
+      familyId: input.familyId,
+      createdBy: input.createdBy,
+      nickname: input.nickname,
+      birthDate: input.birthDate
+    });
+  } catch (err) {
+    result.errors.push({ step: "milestone", message: String(err?.message || err) });
+  }
+  try {
+    const welcome = await generateWelcomeEvent({
+      childId: input.childId,
+      familyId: input.familyId,
+      createdBy: input.createdBy,
+      nickname: input.nickname,
+      birthDate: input.birthDate
+    });
+    result.welcomeEventId = welcome.eventId;
+    result.welcomeRsvps = welcome.rsvpCount;
+  } catch (err) {
+    result.errors.push({ step: "welcome", message: String(err?.message || err) });
+  }
+  return result;
+}
 
 // server/_core/systemRouter.ts
 import { z } from "zod";
@@ -2492,7 +2668,7 @@ var appRouter = router({
       const existing = await getUserByEmail(input.email);
       if (existing) throw new TRPCError3({ code: "CONFLICT", message: "\u8BE5\u90AE\u7BB1\u5DF2\u6CE8\u518C" });
       const passwordHash = await sha256Hex(input.password);
-      const openId = `email_${nanoid(16)}`;
+      const openId = `email_${nanoid2(16)}`;
       const userId = await createEmailUser({
         email: input.email,
         name: input.name,
@@ -2577,7 +2753,7 @@ var appRouter = router({
       if (!user) {
         return { sent: true, emailed: false, resetUrl: null };
       }
-      const token = nanoid(48);
+      const token = nanoid2(48);
       const expiresAt = new Date(Date.now() + EXPIRES_MINUTES * 60 * 1e3);
       try {
         await createPasswordResetToken({ userId: user.id, token, expiresAt });
@@ -2629,7 +2805,7 @@ var appRouter = router({
       return getUserFamilies(ctx.user.id);
     }),
     create: protectedProcedure.input(z2.object({ name: z2.string().min(1).max(100), description: z2.string().optional() })).mutation(async ({ ctx, input }) => {
-      const inviteCode = nanoid(8).toUpperCase();
+      const inviteCode = nanoid2(8).toUpperCase();
       const familyId = await createFamily({
         name: input.name,
         description: input.description,
@@ -2642,7 +2818,7 @@ var appRouter = router({
       }
       const welcomeEventDate = /* @__PURE__ */ new Date();
       welcomeEventDate.setMonth(welcomeEventDate.getMonth() + 6);
-      const welcomeToken = nanoid(16);
+      const welcomeToken = nanoid2(16);
       const welcomeEventId = await createEvent({
         familyId,
         title: "\u{1F389} \u5B9D\u5B9D\u964D\u4E34\u5E86\u795D\u4F1A",
@@ -2831,6 +3007,7 @@ var appRouter = router({
       birthDate: z2.string().optional(),
       avatarUrl: z2.string().optional(),
       color: z2.string().optional(),
+      notes: z2.string().optional().nullable(),
       embryoTransferDate: z2.string().optional(),
       embryoDay: z2.number().optional(),
       pregnancyRefDate: z2.string().optional(),
@@ -2840,16 +3017,59 @@ var appRouter = router({
       childOneName: z2.string().optional().nullable(),
       childTwoName: z2.string().optional().nullable(),
       childOneGender: z2.enum(["girl", "boy", "unknown"]).optional(),
-      childTwoGender: z2.enum(["girl", "boy", "unknown"]).optional()
+      childTwoGender: z2.enum(["girl", "boy", "unknown"]).optional(),
+      // 控制是否执行自动生成逻辑（孕期/里程碑/欢迎活动）。默认 true。
+      autoGenerate: z2.boolean().optional().default(true)
     })).mutation(async ({ ctx, input }) => {
       await assertFamilyCollaboratorOrAdmin(input.familyId, ctx.user.id);
+      const birthDate = input.birthDate ? new Date(input.birthDate) : void 0;
+      const pregnancyRefDate = input.pregnancyRefDate ? new Date(input.pregnancyRefDate) : void 0;
+      const { autoGenerate, ...createPayload } = input;
       const childId = await createChild({
-        ...input,
-        birthDate: input.birthDate ? new Date(input.birthDate) : void 0,
+        ...createPayload,
+        birthDate,
         embryoTransferDate: input.embryoTransferDate ? new Date(input.embryoTransferDate) : void 0,
-        pregnancyRefDate: input.pregnancyRefDate ? new Date(input.pregnancyRefDate) : void 0
+        pregnancyRefDate
       });
-      return { childId };
+      const siblingIds = [];
+      if (input.isMultiple) {
+        const twinA = input.childOneName?.trim();
+        const twinB = input.childTwoName?.trim();
+        if (twinA && twinB) {
+          const siblingId = await createChild({
+            familyId: input.familyId,
+            nickname: twinB,
+            fullName: twinB,
+            gender: input.childTwoGender ?? "unknown",
+            birthDate,
+            color: input.color,
+            embryoTransferDate: input.embryoTransferDate ? new Date(input.embryoTransferDate) : void 0,
+            pregnancyRefDate,
+            pregnancyWeeksAtRef: input.pregnancyWeeksAtRef,
+            pregnancyDaysAtRef: input.pregnancyDaysAtRef,
+            isMultiple: true
+          });
+          siblingIds.push(siblingId);
+        }
+      }
+      let autoResult = null;
+      if (autoGenerate !== false) {
+        try {
+          autoResult = await runChildAutoGeneration({
+            childId,
+            familyId: input.familyId,
+            createdBy: ctx.user.id,
+            nickname: input.nickname,
+            birthDate,
+            pregnancyRefDate,
+            pregnancyWeeksAtRef: input.pregnancyWeeksAtRef,
+            pregnancyDaysAtRef: input.pregnancyDaysAtRef
+          });
+        } catch (err) {
+          console.warn("[children.create] autoGenerate failed:", err);
+        }
+      }
+      return { childId, siblingIds, autoGenerated: autoResult };
     }),
     update: protectedProcedure.input(z2.object({
       childId: z2.number(),
@@ -3062,7 +3282,7 @@ var appRouter = router({
       isPublic: z2.boolean().default(true)
     })).mutation(async ({ ctx, input }) => {
       await assertFamilyCollaboratorOrAdmin(input.familyId, ctx.user.id);
-      const inviteToken = nanoid(16);
+      const inviteToken = nanoid2(16);
       const eventId = await createEvent({
         ...input,
         eventDate: new Date(input.eventDate),
