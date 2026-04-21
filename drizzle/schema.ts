@@ -97,6 +97,9 @@ export const children = mysqlTable("children", {
   childOneGender: mysqlEnum("childOneGender", ["girl", "boy", "unknown"]).default("unknown"), // 双胞胎孩子一的性别
   childTwoGender: mysqlEnum("childTwoGender", ["girl", "boy", "unknown"]).default("unknown"), // 双胞胎孩子二的性别
   notes: text("notes"), // 孩子备注信息
+  // v4.0 share card
+  shareToken: varchar("shareToken", { length: 32 }),
+  shareVisibility: mysqlEnum("shareVisibility", ["public", "connections", "family"]).default("family"),
   // Legacy IVF fields (kept for compatibility)
   embryoTransferDate: timestamp("embryoTransferDate"),
   embryoDay: int("embryoDay").default(5),

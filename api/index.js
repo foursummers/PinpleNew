@@ -145,6 +145,10 @@ ALTER TABLE \`users\` ADD COLUMN \`wechatOpenId\` varchar(64);
 --> statement-breakpoint
 ALTER TABLE \`users\` ADD COLUMN \`reportedCount\` int DEFAULT 0;
 --> statement-breakpoint
+ALTER TABLE \`children\` ADD COLUMN \`shareToken\` varchar(32);
+--> statement-breakpoint
+ALTER TABLE \`children\` ADD COLUMN \`shareVisibility\` enum('public','connections','family') DEFAULT 'family';
+--> statement-breakpoint
 CREATE TABLE \`recommendations\` (
   \`id\` int AUTO_INCREMENT NOT NULL,
   \`userId\` int NOT NULL,
@@ -375,6 +379,9 @@ var init_schema = __esm({
       // 双胞胎孩子二的性别
       notes: text("notes"),
       // 孩子备注信息
+      // v4.0 share card
+      shareToken: varchar("shareToken", { length: 32 }),
+      shareVisibility: mysqlEnum("shareVisibility", ["public", "connections", "family"]).default("family"),
       // Legacy IVF fields (kept for compatibility)
       embryoTransferDate: timestamp("embryoTransferDate"),
       embryoDay: int("embryoDay").default(5),
@@ -666,6 +673,7 @@ __export(db_exports, {
   getAllMilestoneTemplates: () => getAllMilestoneTemplates,
   getBlockedUsers: () => getBlockedUsers,
   getChildById: () => getChildById,
+  getChildByShareToken: () => getChildByShareToken,
   getChildrenByFamily: () => getChildrenByFamily,
   getConnectionBetween: () => getConnectionBetween,
   getDb: () => getDb,
@@ -720,6 +728,7 @@ __export(db_exports, {
   resetDb: () => resetDb,
   searchUsersByName: () => searchUsersByName,
   sendConnectionRequest: () => sendConnectionRequest,
+  setChildShareCard: () => setChildShareCard,
   syncMemberYearlyEvent: () => syncMemberYearlyEvent,
   unblockUser: () => unblockUser,
   updateChild: () => updateChild,
@@ -1090,6 +1099,19 @@ async function updateChild(id, data) {
   const db = await getDb();
   if (!db) return;
   await db.update(children).set(data).where(eq(children.id, id));
+}
+async function setChildShareCard(id, data) {
+  const db = await getDb();
+  if (!db) return;
+  const patch = { shareToken: data.shareToken };
+  if (data.shareVisibility) patch.shareVisibility = data.shareVisibility;
+  await db.update(children).set(patch).where(eq(children.id, id));
+}
+async function getChildByShareToken(token) {
+  const db = await getDb();
+  if (!db) return void 0;
+  const result = await db.select().from(children).where(eq(children.shareToken, token)).limit(1);
+  return result[0];
 }
 async function createTimelineEvent(data) {
   const db = await getDb();
@@ -3285,6 +3307,74 @@ var appRouter = router({
     }),
     calcEDD: publicProcedure.input(z2.object({ transferDate: z2.string(), embryoDay: z2.number().default(5) })).query(({ input }) => {
       return calcEDD(new Date(input.transferDate), input.embryoDay);
+    }),
+    // ─── Share Card ─────────────────────────────────────────────────────
+    // 生成或返回孩子的分享名片 token；默认可见范围 = family（仅家庭链接），
+    // 可选 public（完全公开）/ connections（仅人脉）。
+    shareCard: protectedProcedure.input(z2.object({
+      childId: z2.number(),
+      visibility: z2.enum(["public", "connections", "family"]).optional()
+    })).mutation(async ({ ctx, input }) => {
+      const child = await getChildById(input.childId);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND" });
+      await assertFamilyCollaboratorOrAdmin(child.familyId, ctx.user.id);
+      const token = child.shareToken || nanoid2(16);
+      const visibility = input.visibility ?? child.shareVisibility ?? "family";
+      await setChildShareCard(child.id, {
+        shareToken: token,
+        shareVisibility: visibility
+      });
+      return { token, visibility, shareUrl: `/c/${token}` };
+    }),
+    revokeShareCard: protectedProcedure.input(z2.object({ childId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const child = await getChildById(input.childId);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND" });
+      await assertFamilyAdmin(child.familyId, ctx.user.id);
+      await setChildShareCard(child.id, { shareToken: null });
+      return { success: true };
+    }),
+    // 公开接口：按 token 读取名片。根据 visibility 返回不同粒度的数据。
+    // 调用方如果已登录（ctx.user 存在），visibility='connections' 下会校验
+    // 是否为该孩子家庭成员或家庭创建者的人脉好友；否则仅匿名字段可见。
+    publicCard: publicProcedure.input(z2.object({ token: z2.string().min(8).max(64) })).query(async ({ ctx, input }) => {
+      const child = await getChildByShareToken(input.token);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND" });
+      const visibility = child.shareVisibility ?? "family";
+      const viewerId = ctx?.user?.id;
+      const family = await getFamilyById(child.familyId);
+      let allowed = false;
+      if (visibility === "public") {
+        allowed = true;
+      } else if (viewerId) {
+        const role = await getMemberRole(child.familyId, viewerId);
+        if (role) {
+          allowed = true;
+        } else if (visibility === "connections" && family?.createdBy) {
+          const conn = await getConnectionBetween(viewerId, family.createdBy);
+          allowed = !!conn && conn.status === "accepted";
+        }
+      }
+      const ageInfo = child.birthDate ? calcAge(child.birthDate) : null;
+      const base = {
+        nickname: child.nickname,
+        gender: child.gender,
+        avatarUrl: child.avatarUrl,
+        color: child.color,
+        ageInfo,
+        familyName: family?.name ?? null,
+        visibility,
+        isMultiple: child.isMultiple
+      };
+      if (!allowed) {
+        return { ...base, locked: true };
+      }
+      return {
+        ...base,
+        fullName: child.fullName,
+        birthDate: child.birthDate,
+        notes: child.notes,
+        locked: false
+      };
     })
   }),
   // ─── Timeline─────────────────────────────────────────────────────────────

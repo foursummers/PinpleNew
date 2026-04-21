@@ -44,6 +44,8 @@ import {
   getUserFamilies,
   removeFamilyMember,
   updateChild,
+  setChildShareCard,
+  getChildByShareToken,
   updateEvent,
   updateFamily,
   updateMemberDates,
@@ -960,6 +962,95 @@ export const appRouter = router({
       .input(z.object({ transferDate: z.string(), embryoDay: z.number().default(5) }))
       .query(({ input }) => {
         return calcEDD(new Date(input.transferDate), input.embryoDay);
+      }),
+
+    // ─── Share Card ─────────────────────────────────────────────────────
+    // 生成或返回孩子的分享名片 token；默认可见范围 = family（仅家庭链接），
+    // 可选 public（完全公开）/ connections（仅人脉）。
+    shareCard: protectedProcedure
+      .input(z.object({
+        childId: z.number(),
+        visibility: z.enum(["public", "connections", "family"]).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const child = await getChildById(input.childId);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND" });
+        await assertFamilyCollaboratorOrAdmin(child.familyId, ctx.user.id);
+
+        const token = (child as any).shareToken || nanoid(16);
+        const visibility =
+          input.visibility ?? (child as any).shareVisibility ?? "family";
+        await setChildShareCard(child.id, {
+          shareToken: token,
+          shareVisibility: visibility as "public" | "connections" | "family",
+        });
+        return { token, visibility, shareUrl: `/c/${token}` };
+      }),
+
+    revokeShareCard: protectedProcedure
+      .input(z.object({ childId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const child = await getChildById(input.childId);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND" });
+        await assertFamilyAdmin(child.familyId, ctx.user.id);
+        await setChildShareCard(child.id, { shareToken: null });
+        return { success: true };
+      }),
+
+    // 公开接口：按 token 读取名片。根据 visibility 返回不同粒度的数据。
+    // 调用方如果已登录（ctx.user 存在），visibility='connections' 下会校验
+    // 是否为该孩子家庭成员或家庭创建者的人脉好友；否则仅匿名字段可见。
+    publicCard: publicProcedure
+      .input(z.object({ token: z.string().min(8).max(64) }))
+      .query(async ({ ctx, input }) => {
+        const child = await getChildByShareToken(input.token);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND" });
+        const visibility = ((child as any).shareVisibility ?? "family") as
+          | "public"
+          | "connections"
+          | "family";
+
+        const viewerId = (ctx as any)?.user?.id as number | undefined;
+        const family = await getFamilyById(child.familyId);
+
+        // 可见性闸门：
+        //   public     → 任何人可看基础名片
+        //   connections→ 需要是 family 成员或创建者的已接受人脉
+        //   family     → 仅家庭成员可看
+        let allowed = false;
+        if (visibility === "public") {
+          allowed = true;
+        } else if (viewerId) {
+          const role = await getMemberRole(child.familyId, viewerId);
+          if (role) {
+            allowed = true;
+          } else if (visibility === "connections" && family?.createdBy) {
+            const conn = await getConnectionBetween(viewerId, family.createdBy);
+            allowed = !!conn && conn.status === "accepted";
+          }
+        }
+
+        const ageInfo = child.birthDate ? calcAge(child.birthDate) : null;
+        const base = {
+          nickname: child.nickname,
+          gender: child.gender,
+          avatarUrl: child.avatarUrl,
+          color: child.color,
+          ageInfo,
+          familyName: family?.name ?? null,
+          visibility,
+          isMultiple: child.isMultiple,
+        };
+        if (!allowed) {
+          return { ...base, locked: true } as const;
+        }
+        return {
+          ...base,
+          fullName: child.fullName,
+          birthDate: child.birthDate,
+          notes: child.notes,
+          locked: false,
+        } as const;
       }),
   }),
 

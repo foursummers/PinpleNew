@@ -519,6 +519,28 @@ export async function updateChild(id: number, data: Partial<InsertChild>) {
   await db.update(children).set(data).where(eq(children.id, id));
 }
 
+export async function setChildShareCard(
+  id: number,
+  data: { shareToken: string | null; shareVisibility?: "public" | "connections" | "family" },
+) {
+  const db = await getDb();
+  if (!db) return;
+  const patch: Record<string, unknown> = { shareToken: data.shareToken };
+  if (data.shareVisibility) patch.shareVisibility = data.shareVisibility;
+  await db.update(children).set(patch).where(eq(children.id, id));
+}
+
+export async function getChildByShareToken(token: string): Promise<Child | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(children)
+    .where(eq(children.shareToken, token))
+    .limit(1);
+  return result[0];
+}
+
 // ─── Timeline Events ──────────────────────────────────────────────────────────
 export async function createTimelineEvent(data: InsertTimelineEvent): Promise<number> {
   const db = await getDb();

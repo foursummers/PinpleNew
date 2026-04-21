@@ -44,6 +44,10 @@ ALTER TABLE \`users\` ADD COLUMN \`wechatOpenId\` varchar(64);
 --> statement-breakpoint
 ALTER TABLE \`users\` ADD COLUMN \`reportedCount\` int DEFAULT 0;
 --> statement-breakpoint
+ALTER TABLE \`children\` ADD COLUMN \`shareToken\` varchar(32);
+--> statement-breakpoint
+ALTER TABLE \`children\` ADD COLUMN \`shareVisibility\` enum('public','connections','family') DEFAULT 'family';
+--> statement-breakpoint
 CREATE TABLE \`recommendations\` (
   \`id\` int AUTO_INCREMENT NOT NULL,
   \`userId\` int NOT NULL,
