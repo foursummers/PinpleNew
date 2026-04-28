@@ -31,6 +31,7 @@ import {
   getEventByToken,
   getEventById,
   getEventsByFamily,
+  getUpcomingTimelineByFamily,
   getFamilyByInviteCode,
   getFamilyById,
   getFamilyMembers,
@@ -56,6 +57,7 @@ import {
   updateUserProfile,
   sendConnectionRequest,
   acceptConnection,
+  removeConnection,
   getMyConnections,
   getPendingRequests,
   getUserByUserId,
@@ -1441,33 +1443,41 @@ export const appRouter = router({
   // ─── Connections (人脉好友) ────────────────────────────────────────────
   connections: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getMyConnections(ctx.user.id);
-      // Resolve the "other" user in each connection
-      // When I am the requester, my friend is the receiver; when I am the receiver, my friend is the requester
-      return rows.map((r) => {
-        const isMeRequester = r.requesterId === ctx.user.id;
-        const friendId = isMeRequester ? r.receiverId : r.requesterId;
-        const friendName = isMeRequester ? r.receiverName : r.requesterName;
-        const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
-        // Check mutual: both directions accepted means isMutual
-        return {
-          id: r.id,
-          note: r.note,
-          category: r.category,
-          hasUpdate: r.hasUpdate,
-          createdAt: r.createdAt,
-          requesterId: r.requesterId,
-          receiverId: r.receiverId,
-          friendId,
-          friend: {
-            id: friendId,
-            name: friendName,
-            avatarUrl: friendAvatar,
-          },
-          isMeRequester,
-          isMutual: false, // computed separately via statusWith
-        };
-      });
+      const [rows, blocked] = await Promise.all([
+        getMyConnections(ctx.user.id),
+        getBlockedUsers(ctx.user.id),
+      ]);
+      const blockedIds = new Set(blocked.map((b: any) => b.blockedUserId));
+
+      return rows
+        .filter((r) => {
+          const friendId =
+            r.requesterId === ctx.user.id ? r.receiverId : r.requesterId;
+          return !blockedIds.has(friendId);
+        })
+        .map((r) => {
+          const isMeRequester = r.requesterId === ctx.user.id;
+          const friendId = isMeRequester ? r.receiverId : r.requesterId;
+          const friendName = isMeRequester ? r.receiverName : r.requesterName;
+          const friendAvatar = isMeRequester ? r.receiverAvatar : r.requesterAvatar;
+          return {
+            id: r.id,
+            note: r.note,
+            category: r.category,
+            hasUpdate: r.hasUpdate,
+            createdAt: r.createdAt,
+            requesterId: r.requesterId,
+            receiverId: r.receiverId,
+            friendId,
+            friend: {
+              id: friendId,
+              name: friendName,
+              avatarUrl: friendAvatar,
+            },
+            isMeRequester,
+            isMutual: false, // computed separately via statusWith
+          };
+        });
     }),
     pending: protectedProcedure.query(async ({ ctx }) => {
       return getPendingRequests(ctx.user.id);
@@ -1490,6 +1500,20 @@ export const appRouter = router({
       .input(z.object({ connectionId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         await acceptConnection(input.connectionId, ctx.user.id);
+        return { success: true };
+      }),
+    /**
+     * 删除好友关系 / 撤回或拒绝好友申请。任一方都可以调用：
+     *   - pending 状态：请求方撤回 / 接收方拒绝
+     *   - accepted 状态：任一方解除好友关系
+     */
+    remove: protectedProcedure
+      .input(z.object({ connectionId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const affected = await removeConnection(input.connectionId, ctx.user.id);
+        if (affected === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "无权删除该连接或连接不存在" });
+        }
         return { success: true };
       }),
     listWithCategory: protectedProcedure.query(async ({ ctx }) => {
@@ -1926,6 +1950,112 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const blocked = await isUserBlocked(ctx.user.id, input.targetUserId);
         return { isBlocked: blocked };
+      }),
+  }),
+
+  // ─── Calendar 多家庭日历聚合 ───────────────────────────────────────
+  //  汇总活动(events) + 成员生日/纪念日(member_events, 年循环展开) +
+  //  孩子里程碑/孕期事件(timeline_events)，给日历视图一次取到。
+  calendar: router({
+    upcoming: protectedProcedure
+      .input(z.object({
+        familyIds: z.array(z.number()).min(1),
+        // 默认窗口：当前 UTC 日期起 90 天
+        from: z.string().optional(),
+        to: z.string().optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        const from = input.from ? new Date(input.from) : new Date();
+        const to = input.to
+          ? new Date(input.to)
+          : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+
+        // 权限校验：每个 familyId 都必须是当前用户的家庭
+        for (const fid of input.familyIds) {
+          await assertFamilyMember(fid, ctx.user.id);
+        }
+
+        type Item = {
+          kind: "event" | "memberEvent" | "milestone" | "pregnancy" | "birthday" | "anniversary";
+          familyId: number;
+          title: string;
+          date: Date;
+          refId: number;
+          meta?: Record<string, unknown>;
+        };
+
+        const items: Item[] = [];
+
+        for (const fid of input.familyIds) {
+          // 1) 活动
+          const evts = await getEventsByFamily(fid);
+          for (const e of evts) {
+            if (e.eventDate >= from && e.eventDate <= to) {
+              items.push({
+                kind: "event",
+                familyId: fid,
+                title: e.title,
+                date: e.eventDate,
+                refId: e.id,
+                meta: { location: e.location, inviteToken: e.inviteToken },
+              });
+            }
+          }
+
+          // 2) 成员事件（年循环展开到窗口内的下一次发生）
+          const memEvts = await getMemberEventsByFamily(fid);
+          for (const me of memEvts) {
+            const base = new Date(me.eventDate);
+            if (!me.isYearly) {
+              if (base >= from && base <= to) {
+                items.push({
+                  kind: me.eventType === "birthday" ? "birthday" :
+                        me.eventType === "anniversary" ? "anniversary" : "memberEvent",
+                  familyId: fid,
+                  title: me.title,
+                  date: base,
+                  refId: me.id,
+                  meta: { userId: me.userId },
+                });
+              }
+              continue;
+            }
+            // 展开：取 [from.year - 1, to.year + 1] 内与月/日匹配的日期
+            const startY = from.getUTCFullYear() - 1;
+            const endY = to.getUTCFullYear() + 1;
+            for (let y = startY; y <= endY; y++) {
+              const occ = new Date(Date.UTC(y, base.getUTCMonth(), base.getUTCDate()));
+              if (occ >= from && occ <= to) {
+                items.push({
+                  kind: me.eventType === "birthday" ? "birthday" :
+                        me.eventType === "anniversary" ? "anniversary" : "memberEvent",
+                  familyId: fid,
+                  title: me.title,
+                  date: occ,
+                  refId: me.id,
+                  meta: { userId: me.userId, yearly: true },
+                });
+              }
+            }
+          }
+
+          // 3) 时间轴里程碑/孕期事件（仅窗口内未来时间的 milestone/pregnancy）
+          const timelineItems = await getUpcomingTimelineByFamily(fid, from, to);
+          for (const t of timelineItems) {
+            if (t.type !== "milestone" && t.type !== "pregnancy") continue;
+            items.push({
+              kind: t.type,
+              familyId: fid,
+              title: t.title,
+              date: t.eventDate,
+              refId: t.id,
+              meta: { childId: t.childId },
+            });
+          }
+        }
+
+        items.sort((a, b) => a.date.getTime() - b.date.getTime());
+        return { from, to, count: items.length, items };
       }),
   }),
 });

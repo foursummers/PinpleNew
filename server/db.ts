@@ -519,6 +519,37 @@ export async function updateChild(id: number, data: Partial<InsertChild>) {
   await db.update(children).set(data).where(eq(children.id, id));
 }
 
+/**
+ * Multi-family calendar helper — returns upcoming timeline milestone/pregnancy
+ * events for a given family between [from, to]. Used by calendar aggregation.
+ */
+export async function getUpcomingTimelineByFamily(
+  familyId: number,
+  from: Date,
+  to: Date,
+) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      id: timelineEvents.id,
+      familyId: timelineEvents.familyId,
+      childId: timelineEvents.childId,
+      type: timelineEvents.type,
+      title: timelineEvents.title,
+      eventDate: timelineEvents.eventDate,
+    })
+    .from(timelineEvents)
+    .where(
+      and(
+        eq(timelineEvents.familyId, familyId),
+        gte(timelineEvents.eventDate, from),
+        lte(timelineEvents.eventDate, to),
+      ),
+    )
+    .orderBy(timelineEvents.eventDate);
+}
+
 export async function setChildShareCard(
   id: number,
   data: { shareToken: string | null; shareVisibility?: "public" | "connections" | "family" },
@@ -747,6 +778,33 @@ export async function acceptConnection(connectionId: number, userId: number): Pr
   await db.update(connections)
     .set({ status: "accepted" })
     .where(and(eq(connections.id, connectionId), eq(connections.receiverId, userId)));
+}
+
+/**
+ * Remove/decline a connection. Either party can call this:
+ *   - If the connection is `pending` and userId is the requester,  the
+ *     request is rescinded.
+ *   - If the connection is `pending` and userId is the receiver,   the
+ *     request is declined.
+ *   - If the connection is `accepted`, either party can unfriend.
+ * Returns number of rows affected (0 = not found / not a party).
+ */
+export async function removeConnection(
+  connectionId: number,
+  userId: number,
+): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const existing = await db
+    .select()
+    .from(connections)
+    .where(eq(connections.id, connectionId))
+    .limit(1);
+  const row = existing[0];
+  if (!row) return 0;
+  if (row.requesterId !== userId && row.receiverId !== userId) return 0;
+  await db.delete(connections).where(eq(connections.id, connectionId));
+  return 1;
 }
 
 export async function getMyConnections(userId: number) {

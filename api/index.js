@@ -101,7 +101,7 @@ var init_young_firestar = __esm({
 var password_resets_default;
 var init_password_resets = __esm({
   "drizzle/0011_password_resets.sql"() {
-    password_resets_default = "CREATE TABLE IF NOT EXISTS `password_reset_tokens` (\n  `id` int AUTO_INCREMENT NOT NULL,\n  `userId` int NOT NULL,\n  `token` varchar(128) NOT NULL,\n  `expiresAt` timestamp NOT NULL,\n  `usedAt` timestamp NULL,\n  `createdAt` timestamp NOT NULL DEFAULT (now()),\n  CONSTRAINT `password_reset_tokens_id` PRIMARY KEY(`id`),\n  CONSTRAINT `password_reset_tokens_token_unique` UNIQUE(`token`)\n);\n";
+    password_resets_default = "CREATE TABLE IF NOT EXISTS `password_reset_tokens` (\r\n  `id` int AUTO_INCREMENT NOT NULL,\r\n  `userId` int NOT NULL,\r\n  `token` varchar(128) NOT NULL,\r\n  `expiresAt` timestamp NOT NULL,\r\n  `usedAt` timestamp NULL,\r\n  `createdAt` timestamp NOT NULL DEFAULT (now()),\r\n  CONSTRAINT `password_reset_tokens_id` PRIMARY KEY(`id`),\r\n  CONSTRAINT `password_reset_tokens_token_unique` UNIQUE(`token`)\r\n);\r\n";
   }
 });
 
@@ -713,6 +713,7 @@ __export(db_exports, {
   getTaskFrequencyStats: () => getTaskFrequencyStats,
   getTimelineEvents: () => getTimelineEvents,
   getTodayCheckins: () => getTodayCheckins,
+  getUpcomingTimelineByFamily: () => getUpcomingTimelineByFamily,
   getUserByEmail: () => getUserByEmail,
   getUserById: () => getUserById,
   getUserByOpenId: () => getUserByOpenId,
@@ -724,6 +725,7 @@ __export(db_exports, {
   leaveFamilyMember: () => leaveFamilyMember,
   markConnectionUpdated: () => markConnectionUpdated,
   markPasswordResetTokenUsed: () => markPasswordResetTokenUsed,
+  removeConnection: () => removeConnection,
   removeFamilyMember: () => removeFamilyMember,
   resetDb: () => resetDb,
   searchUsersByName: () => searchUsersByName,
@@ -1100,6 +1102,24 @@ async function updateChild(id, data) {
   if (!db) return;
   await db.update(children).set(data).where(eq(children.id, id));
 }
+async function getUpcomingTimelineByFamily(familyId, from, to) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: timelineEvents.id,
+    familyId: timelineEvents.familyId,
+    childId: timelineEvents.childId,
+    type: timelineEvents.type,
+    title: timelineEvents.title,
+    eventDate: timelineEvents.eventDate
+  }).from(timelineEvents).where(
+    and(
+      eq(timelineEvents.familyId, familyId),
+      gte(timelineEvents.eventDate, from),
+      lte(timelineEvents.eventDate, to)
+    )
+  ).orderBy(timelineEvents.eventDate);
+}
 async function setChildShareCard(id, data) {
   const db = await getDb();
   if (!db) return;
@@ -1268,6 +1288,16 @@ async function acceptConnection(connectionId, userId) {
   const db = await getDb();
   if (!db) throw new Error("DB not available");
   await db.update(connections).set({ status: "accepted" }).where(and(eq(connections.id, connectionId), eq(connections.receiverId, userId)));
+}
+async function removeConnection(connectionId, userId) {
+  const db = await getDb();
+  if (!db) return 0;
+  const existing = await db.select().from(connections).where(eq(connections.id, connectionId)).limit(1);
+  const row = existing[0];
+  if (!row) return 0;
+  if (row.requesterId !== userId && row.receiverId !== userId) return 0;
+  await db.delete(connections).where(eq(connections.id, connectionId));
+  return 1;
 }
 async function getMyConnections(userId) {
   const db = await getDb();
@@ -3680,8 +3710,15 @@ var appRouter = router({
   // ─── Connections (人脉好友) ────────────────────────────────────────────
   connections: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const rows = await getMyConnections(ctx.user.id);
-      return rows.map((r) => {
+      const [rows, blocked] = await Promise.all([
+        getMyConnections(ctx.user.id),
+        getBlockedUsers(ctx.user.id)
+      ]);
+      const blockedIds = new Set(blocked.map((b) => b.blockedUserId));
+      return rows.filter((r) => {
+        const friendId = r.requesterId === ctx.user.id ? r.receiverId : r.requesterId;
+        return !blockedIds.has(friendId);
+      }).map((r) => {
         const isMeRequester = r.requesterId === ctx.user.id;
         const friendId = isMeRequester ? r.receiverId : r.requesterId;
         const friendName = isMeRequester ? r.receiverName : r.requesterName;
@@ -3723,6 +3760,18 @@ var appRouter = router({
     }),
     accept: protectedProcedure.input(z2.object({ connectionId: z2.number() })).mutation(async ({ ctx, input }) => {
       await acceptConnection(input.connectionId, ctx.user.id);
+      return { success: true };
+    }),
+    /**
+     * 删除好友关系 / 撤回或拒绝好友申请。任一方都可以调用：
+     *   - pending 状态：请求方撤回 / 接收方拒绝
+     *   - accepted 状态：任一方解除好友关系
+     */
+    remove: protectedProcedure.input(z2.object({ connectionId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const affected = await removeConnection(input.connectionId, ctx.user.id);
+      if (affected === 0) {
+        throw new TRPCError3({ code: "NOT_FOUND", message: "\u65E0\u6743\u5220\u9664\u8BE5\u8FDE\u63A5\u6216\u8FDE\u63A5\u4E0D\u5B58\u5728" });
+      }
       return { success: true };
     }),
     listWithCategory: protectedProcedure.query(async ({ ctx }) => {
@@ -4060,6 +4109,85 @@ var appRouter = router({
     check: protectedProcedure.input(z2.object({ targetUserId: z2.number() })).query(async ({ ctx, input }) => {
       const blocked = await isUserBlocked(ctx.user.id, input.targetUserId);
       return { isBlocked: blocked };
+    })
+  }),
+  // ─── Calendar 多家庭日历聚合 ───────────────────────────────────────
+  //  汇总活动(events) + 成员生日/纪念日(member_events, 年循环展开) +
+  //  孩子里程碑/孕期事件(timeline_events)，给日历视图一次取到。
+  calendar: router({
+    upcoming: protectedProcedure.input(z2.object({
+      familyIds: z2.array(z2.number()).min(1),
+      // 默认窗口：当前 UTC 日期起 90 天
+      from: z2.string().optional(),
+      to: z2.string().optional()
+    })).query(async ({ ctx, input }) => {
+      const from = input.from ? new Date(input.from) : /* @__PURE__ */ new Date();
+      const to = input.to ? new Date(input.to) : new Date(Date.now() + 90 * 24 * 60 * 60 * 1e3);
+      for (const fid of input.familyIds) {
+        await assertFamilyMember(fid, ctx.user.id);
+      }
+      const items = [];
+      for (const fid of input.familyIds) {
+        const evts = await getEventsByFamily(fid);
+        for (const e of evts) {
+          if (e.eventDate >= from && e.eventDate <= to) {
+            items.push({
+              kind: "event",
+              familyId: fid,
+              title: e.title,
+              date: e.eventDate,
+              refId: e.id,
+              meta: { location: e.location, inviteToken: e.inviteToken }
+            });
+          }
+        }
+        const memEvts = await getMemberEventsByFamily(fid);
+        for (const me of memEvts) {
+          const base = new Date(me.eventDate);
+          if (!me.isYearly) {
+            if (base >= from && base <= to) {
+              items.push({
+                kind: me.eventType === "birthday" ? "birthday" : me.eventType === "anniversary" ? "anniversary" : "memberEvent",
+                familyId: fid,
+                title: me.title,
+                date: base,
+                refId: me.id,
+                meta: { userId: me.userId }
+              });
+            }
+            continue;
+          }
+          const startY = from.getUTCFullYear() - 1;
+          const endY = to.getUTCFullYear() + 1;
+          for (let y = startY; y <= endY; y++) {
+            const occ = new Date(Date.UTC(y, base.getUTCMonth(), base.getUTCDate()));
+            if (occ >= from && occ <= to) {
+              items.push({
+                kind: me.eventType === "birthday" ? "birthday" : me.eventType === "anniversary" ? "anniversary" : "memberEvent",
+                familyId: fid,
+                title: me.title,
+                date: occ,
+                refId: me.id,
+                meta: { userId: me.userId, yearly: true }
+              });
+            }
+          }
+        }
+        const timelineItems = await getUpcomingTimelineByFamily(fid, from, to);
+        for (const t2 of timelineItems) {
+          if (t2.type !== "milestone" && t2.type !== "pregnancy") continue;
+          items.push({
+            kind: t2.type,
+            familyId: fid,
+            title: t2.title,
+            date: t2.eventDate,
+            refId: t2.id,
+            meta: { childId: t2.childId }
+          });
+        }
+      }
+      items.sort((a, b) => a.date.getTime() - b.date.getTime());
+      return { from, to, count: items.length, items };
     })
   })
 });
