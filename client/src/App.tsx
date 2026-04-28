@@ -53,7 +53,15 @@ function handleAuthErrorOnce() {
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type User = { id: number; name: string | null; email: string | null; avatarUrl: string | null; openId: string };
+type User = {
+  id: number;
+  name: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+  openId: string;
+  creditScore?: number;
+  reportedCount?: number;
+};
 type Family = { id: number; name: string; inviteCode: string; memberRole?: string };
 type Child = {
   id: number; familyId: number; nickname: string; fullName?: string;
@@ -64,6 +72,8 @@ type Child = {
   ageInfo?: { years: number; months: number; totalMonths: number };
   eddInfo?: { lmp: Date; edd: Date; twin37w: Date };
   notes?: string;
+  shareToken?: string | null;
+  shareVisibility?: "public" | "connections" | "family";
 };
 type TimelineEvent = {
   id: number; childId: number; type: string; title: string;
@@ -1566,6 +1576,18 @@ function ChildrenPage({ family, children, onRefresh }: { family: Family; childre
   const [error, setError] = useState("");
   const [form, setForm] = useState({ nickname: "", isMultiple: false, childOneName: "", childTwoName: "", childOneGender: "unknown", childTwoGender: "unknown", pregnancyRefDate: "", pregnancyWeeksAtRef: 8, embryoTransferDate: "", embryoDay: 5, notes: "" });
 
+  const shareChild = async (child: Child, visibility: "public" | "connections" | "family" = "family") => {
+    try {
+      const res = await (trpc as any).children.shareCard.mutate({ childId: child.id, visibility });
+      const url = `${window.location.origin}${res.shareUrl}`;
+      await navigator.clipboard?.writeText(url);
+      alert(`分享名片已生成并复制：${url}`);
+      onRefresh();
+    } catch (e: any) {
+      alert(e?.message || "生成分享名片失败");
+    }
+  };
+
   const addChild = async () => {
     if (!form.nickname) { setError("请填写昵称"); return; }
     setBusy(true); setError("");
@@ -1632,6 +1654,10 @@ function ChildrenPage({ family, children, onRefresh }: { family: Family; childre
                   {c.eddInfo?.edd && <span className="pill pill-amber">预产 {fmt(c.eddInfo.edd.toString())}</span>}
                 </div>
                 {c.notes && <div style={{ fontSize: 13, color: "var(--c-ink2)", marginTop: 10, padding: "8px 12px", background: "var(--c-surface2)", borderRadius: 8 }}>{c.notes}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                  <button className="btn-outline btn-sm" onClick={() => shareChild(c, "family")}>复制家庭名片</button>
+                  <button className="btn-outline btn-sm" onClick={() => shareChild(c, "public")}>公开名片</button>
+                </div>
               </div>
             );
           })}
@@ -1968,12 +1994,211 @@ function TasksPage({ family, children, tasks, onRefresh }: { family: Family; chi
   );
 }
 
+// ─── Connections Page ─────────────────────────────────────────────────────────
+function ConnectionsPage({ user }: { user: User }) {
+  const [connections, setConnections] = useState<any[]>([]);
+  const [pending, setPending] = useState<any[]>([]);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [list, reqs] = await Promise.all([
+        (trpc as any).connections.list.query(),
+        (trpc as any).connections.pending.query(),
+      ]);
+      setConnections(list);
+      setPending(reqs);
+    } catch (e) {
+      console.error("[connections] load failed", e);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const search = async () => {
+    if (!query.trim()) return;
+    try {
+      const rows = await (trpc as any).connections.search.query({ query: query.trim() });
+      setResults(rows);
+    } catch (e: any) {
+      alert(e?.message || "搜索失败");
+    }
+  };
+
+  const sendRequest = async (receiverId: number) => {
+    try {
+      await (trpc as any).connections.sendRequest.mutate({ receiverId, note: "来自拼朋友" });
+      alert("已发送人脉请求");
+      setResults([]);
+      load();
+    } catch (e: any) {
+      alert(e?.message || "发送失败");
+    }
+  };
+
+  const accept = async (connectionId: number) => {
+    try {
+      await (trpc as any).connections.accept.mutate({ connectionId });
+      load();
+    } catch (e: any) {
+      alert(e?.message || "接受失败");
+    }
+  };
+
+  const remove = async (connectionId: number) => {
+    try {
+      await (trpc as any).connections.remove.mutate({ connectionId });
+      load();
+    } catch (e: any) {
+      alert(e?.message || "删除失败");
+    }
+  };
+
+  const grouped = connections.reduce((acc: Record<string, any[]>, c) => {
+    const key = c.category || "life";
+    acc[key] = acc[key] || [];
+    acc[key].push(c);
+    return acc;
+  }, {});
+  const categoryName: Record<string, string> = { life: "生活", work: "工作", family: "家庭", kids: "育儿", pets: "宠物" };
+
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">人脉圈</div>
+        <div className="page-subtitle">五类人脉、好友请求、屏蔽过滤已接入</div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") search(); }}
+            placeholder="搜索用户昵称、邮箱或 ID"
+            style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid var(--c-border2)", background: "var(--c-surface2)", color: "var(--c-ink)" }}
+          />
+          <button className="btn-outline btn-sm" onClick={search}>搜索</button>
+        </div>
+        {results.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            {results.map((r: any) => (
+              <div className="list-item" key={r.id} style={{ paddingLeft: 0, paddingRight: 0 }}>
+                <div>
+                  <div className="list-item-title">{r.name || r.email || `用户 ${r.id}`}</div>
+                  <div className="list-item-meta">ID {r.id} · 信用 {r.creditScore ?? 100}</div>
+                </div>
+                <button className="btn-outline btn-sm" onClick={() => sendRequest(r.id)}>添加</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {loading ? <Spinner /> : (
+        <>
+          {pending.length > 0 && (
+            <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+              {pending.map((p: any) => (
+                <div key={p.id} className="list-item">
+                  <div className="list-item-title">{p.requesterName || `用户 ${p.requesterId}`} 请求添加你</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button className="btn-outline btn-sm" onClick={() => accept(p.id)}>接受</button>
+                    <button className="btn-outline btn-sm" onClick={() => remove(p.id)}>拒绝</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {connections.length === 0 ? (
+            <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无人脉，先搜索添加一个朋友</div>
+          ) : Object.entries(grouped).map(([cat, rows]) => (
+            <div className="card" style={{ padding: 0, marginBottom: 12 }} key={cat}>
+              <div className="list-item">
+                <div className="list-item-title">{categoryName[cat] || cat}</div>
+                <div className="list-item-meta">{(rows as any[]).length} 位联系人</div>
+              </div>
+              {(rows as any[]).map(c => (
+                <div key={c.id} className="list-item">
+                  <div>
+                    <div className="list-item-title">{c.friend?.name || `用户 ${c.friendId}`}</div>
+                    <div className="list-item-meta">ID {c.friendId} {c.note ? `· ${c.note}` : ""}</div>
+                  </div>
+                  <button className="btn-outline btn-sm" onClick={() => remove(c.id)}>删除</button>
+                </div>
+              ))}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Calendar Page ────────────────────────────────────────────────────────────
+function CalendarPage({ family }: { family: Family }) {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    (trpc as any).calendar.upcoming
+      .query({ familyIds: [family.id] })
+      .then((res: any) => setItems(res.items || []))
+      .catch((e: any) => alert(e?.message || "加载日历失败"))
+      .finally(() => setLoading(false));
+  }, [family.id]);
+
+  const kindName: Record<string, string> = {
+    event: "活动",
+    birthday: "生日",
+    anniversary: "纪念日",
+    memberEvent: "成员事件",
+    milestone: "里程碑",
+    pregnancy: "孕期",
+  };
+
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">家庭日历</div>
+        <div className="page-subtitle">聚合活动、生日纪念日、孕期和成长里程碑</div>
+      </div>
+      {loading ? <Spinner /> : items.length === 0 ? (
+        <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>未来 90 天暂无日程</div>
+      ) : (
+        <div className="card" style={{ padding: 0 }}>
+          {items.map((it, idx) => (
+            <div className="list-item" key={`${it.kind}-${it.refId}-${idx}`}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                <div>
+                  <div className="list-item-title">{it.title}</div>
+                  <div className="list-item-meta">{fmtFull(it.date)} · {kindName[it.kind] || it.kind}</div>
+                </div>
+                <span className={`pill ${it.kind === "pregnancy" ? "pill-amber" : it.kind === "milestone" ? "pill-green" : "pill-rose"}`}>
+                  {kindName[it.kind] || it.kind}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Skills/Market Page ───────────────────────────────────────────────────────
 function MarketPage({ user }: { user: User }) {
   const [tab, setTab] = useState<"skills" | "requests" | "mine">("skills");
   const [skills, setSkills] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
   const [mySkills, setMySkills] = useState<any[]>([]);
+  const [myRequests, setMyRequests] = useState<any[]>([]);
+  const [matchesByRequest, setMatchesByRequest] = useState<Record<number, any[]>>({});
   const [loading, setLoading] = useState(true);
   const [showPublish, setShowPublish] = useState(false);
   const [showRequest, setShowRequest] = useState(false);
@@ -1983,12 +2208,25 @@ function MarketPage({ user }: { user: User }) {
   const load = async () => {
     setLoading(true);
     try {
-      const [s, r, m] = await Promise.all([
+      const [s, r, m, mineReqs] = await Promise.all([
         (trpc as any).skills.list.query({ limit: 20, offset: 0 }),
         (trpc as any).helpRequests.list.query({ limit: 20, offset: 0 }),
         (trpc as any).skills.mySkills.query(),
+        (trpc as any).helpRequests.myRequests.query(),
       ]);
       setSkills(s); setRequests(r); setMySkills(m);
+      setMyRequests(mineReqs);
+      const pairs = await Promise.all(
+        mineReqs.map(async (req: any) => {
+          try {
+            const matches = await (trpc as any).helpRequests.matchesByRequest.query({ requestId: req.id });
+            return [req.id, matches] as const;
+          } catch {
+            return [req.id, []] as const;
+          }
+        }),
+      );
+      setMatchesByRequest(Object.fromEntries(pairs));
     } catch {}
     setLoading(false);
   };
@@ -2002,6 +2240,23 @@ function MarketPage({ user }: { user: User }) {
   const publishRequest = async () => {
     if (!rForm.title) return;
     try { await (trpc as any).helpRequests.create.mutate(rForm); load(); setShowRequest(false); } catch (e: any) { alert(e?.message || "发布失败"); }
+  };
+  const acceptRequest = async (requestId: number) => {
+    const skill = mySkills.find(s => s.status === "active");
+    if (!skill) { alert("请先发布并启用一个技能"); return; }
+    try {
+      await (trpc as any).helpRequests.match.mutate({ requestId, skillId: skill.id });
+      alert("已接单，等待对方接受");
+      load();
+    } catch (e: any) { alert(e?.message || "接单失败"); }
+  };
+  const acceptMatch = async (matchId: number) => {
+    try { await (trpc as any).helpRequests.acceptMatch.mutate({ matchId }); load(); }
+    catch (e: any) { alert(e?.message || "接受失败"); }
+  };
+  const completeMatch = async (matchId: number) => {
+    try { await (trpc as any).helpRequests.completeMatch.mutate({ matchId }); load(); }
+    catch (e: any) { alert(e?.message || "确认完成失败"); }
   };
 
   const CATS: Record<string, string> = { education: "教育", childcare: "育儿", housekeeping: "家政", tech: "技术", other: "其他" };
@@ -2057,23 +2312,54 @@ function MarketPage({ user }: { user: User }) {
                   </div>
                   <div className="list-item-meta">{r.location}</div>
                   {r.description && <div className="list-item-desc">{r.description}</div>}
+                  {r.userId !== user.id && r.status === "open" && (
+                    <button className="btn-outline btn-sm" style={{ marginTop: 10 }} onClick={() => acceptRequest(r.id)}>
+                      用我的技能接单
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
           )}
           {tab === "mine" && (
-            mySkills.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>还没有发布技能</div> :
-            <div className="card" style={{ padding: 0 }}>
-              {mySkills.map((s, i) => (
-                <div key={i} className="list-item">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <div className="list-item-title">{s.name}</div>
-                    <span className={`pill ${s.status === "active" ? "pill-green" : "pill-amber"}`}>{s.status === "active" ? "上架" : "下架"}</span>
+            <>
+              <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+                <div className="list-item"><div className="list-item-title">我的技能</div></div>
+                {mySkills.length === 0 ? (
+                  <div className="list-item"><div className="list-item-meta">还没有发布技能</div></div>
+                ) : mySkills.map((s, i) => (
+                  <div key={i} className="list-item">
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div className="list-item-title">{s.name}</div>
+                      <span className={`pill ${s.status === "active" ? "pill-green" : "pill-amber"}`}>{s.status === "active" ? "上架" : "下架"}</span>
+                    </div>
+                    <div className="list-item-meta">{s.category} {s.location ? `· ${s.location}` : ""}</div>
                   </div>
-                  <div className="list-item-meta">{s.category} {s.location ? `· ${s.location}` : ""}</div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+              <div className="card" style={{ padding: 0 }}>
+                <div className="list-item"><div className="list-item-title">我的求助与接单</div></div>
+                {myRequests.length === 0 ? (
+                  <div className="list-item"><div className="list-item-meta">还没有发布求助</div></div>
+                ) : myRequests.map((req) => (
+                  <div key={req.id} className="list-item">
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div className="list-item-title">{req.title}</div>
+                      <span className="pill pill-amber">{req.status}</span>
+                    </div>
+                    {(matchesByRequest[req.id] || []).map(match => (
+                      <div key={match.id} style={{ marginTop: 10, padding: 10, borderRadius: 10, background: "var(--c-surface2)" }}>
+                        <div className="list-item-meta">匹配 #{match.id} · provider {match.providerId} · {match.status}</div>
+                        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                          {match.status === "pending" && <button className="btn-outline btn-sm" onClick={() => acceptMatch(match.id)}>接受</button>}
+                          {match.status === "accepted" && <button className="btn-outline btn-sm" onClick={() => completeMatch(match.id)}>确认完成</button>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </>
       )}
@@ -2129,7 +2415,10 @@ function ProfilePage({ user, family, onLogout, onSwitchFamily }: { user: User; f
   const [creditScore, setCreditScore] = useState<number | null>(null);
 
   useEffect(() => {
-    (trpc as any).users.me.query().then(() => {}).catch(() => {});
+    (trpc as any).users.me
+      .query()
+      .then((me: User) => setCreditScore(me.creditScore ?? 100))
+      .catch(() => setCreditScore(user.creditScore ?? 100));
   }, []);
 
   const color = getAvatarColor(user.openId);
@@ -2161,7 +2450,7 @@ function ProfilePage({ user, family, onLogout, onSwitchFamily }: { user: User; f
         <div className="profile-row">
           <span className="profile-row-icon">🌟</span>
           <span className="profile-row-label">信用分</span>
-          <span className="profile-row-value">100分</span>
+          <span className="profile-row-value">{creditScore ?? user.creditScore ?? 100}分</span>
           <span className="profile-row-arrow">›</span>
         </div>
         <div className="profile-row">
@@ -2204,6 +2493,8 @@ const NAV_ITEMS = [
   { id: "children", icon: "👶", label: "宝宝" },
   { id: "manual", icon: "📖", label: "手册" },
   { id: "tasks", icon: "✅", label: "打卡" },
+  { id: "connections", icon: "👥", label: "人脉" },
+  { id: "calendar", icon: "🗓", label: "日历" },
   { id: "market", icon: "🛍", label: "市场" },
   { id: "profile", icon: "👤", label: "我的" },
 ];
@@ -2344,6 +2635,8 @@ function AppInner() {
       case "children": return <ChildrenPage family={family} children={children} onRefresh={() => loadFamilyData(family)} />;
       case "manual": return <ManualPage children={children} />;
       case "tasks": return <TasksPage family={family} children={children} tasks={tasks} onRefresh={() => loadFamilyData(family)} />;
+      case "connections": return <ConnectionsPage user={user} />;
+      case "calendar": return <CalendarPage family={family} />;
       case "market": return <MarketPage user={user} />;
       case "profile": return <ProfilePage user={user} family={family} onLogout={handleLogout} onSwitchFamily={() => setFamily(null)} />;
       default: return <DashboardPage family={family} user={user} children={children} tasks={tasks} />;
