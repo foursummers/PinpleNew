@@ -325,6 +325,15 @@ export async function updateUserCreditScore(userId: number, delta: number) {
   return newScore;
 }
 
+export async function incrementUserReportedCount(userId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(users)
+    .set({ reportedCount: sql`COALESCE(${users.reportedCount}, 0) + 1` })
+    .where(eq(users.id, userId));
+}
+
 export async function getUserCreditScore(userId: number): Promise<number> {
   const user = await getUserById(userId);
   return user?.creditScore ?? 100;
@@ -1494,6 +1503,13 @@ export async function getSkillsByUser(userId: number) {
   return db.select().from(skills).where(eq(skills.userId, userId)).orderBy(desc(skills.createdAt));
 }
 
+export async function getSkillById(skillId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(skills).where(eq(skills.id, skillId)).limit(1);
+  return result[0];
+}
+
 export async function getActiveSkills(limit = 20, offset = 0) {
   const db = await getDb();
   if (!db) return [];
@@ -1518,6 +1534,13 @@ export async function getHelpRequestsByUser(userId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(helpRequests).where(eq(helpRequests.userId, userId)).orderBy(desc(helpRequests.createdAt));
+}
+
+export async function getHelpRequestById(requestId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(helpRequests).where(eq(helpRequests.id, requestId)).limit(1);
+  return result[0];
 }
 
 export async function getOpenHelpRequests(limit = 20, offset = 0) {
@@ -1546,6 +1569,13 @@ export async function getMatchesByRequest(requestId: number) {
   return db.select().from(skillMatches).where(eq(skillMatches.requestId, requestId));
 }
 
+export async function getSkillMatchById(matchId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(skillMatches).where(eq(skillMatches.id, matchId)).limit(1);
+  return result[0];
+}
+
 export async function updateMatchStatus(matchId: number, status: "pending" | "accepted" | "rejected" | "completed") {
   const db = await getDb();
   if (!db) return;
@@ -1564,6 +1594,17 @@ export async function getReviewsForUser(userId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(reviews).where(eq(reviews.toUserId, userId)).orderBy(desc(reviews.createdAt));
+}
+
+export async function getReviewByMatchAndAuthor(matchId: number, fromUserId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(reviews)
+    .where(and(eq(reviews.matchId, matchId), eq(reviews.fromUserId, fromUserId)))
+    .limit(1);
+  return result[0];
 }
 
 // ─── User Reports 举报 ───────────────────────────────────────────────────────

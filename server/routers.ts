@@ -98,6 +98,7 @@ import {
     getUserByEmail,
     createEmailUser,
     updateUserCreditScore,
+    incrementUserReportedCount,
     getUserCreditScore,
     updateUserPassword,
     createPasswordResetToken,
@@ -107,17 +108,21 @@ import {
     getRecommendationChain,
     createSkill,
     getSkillsByUser,
+    getSkillById,
     getActiveSkills,
     updateSkillStatus,
     createHelpRequest,
     getHelpRequestsByUser,
+    getHelpRequestById,
     getOpenHelpRequests,
     updateHelpRequestStatus,
     createSkillMatch,
     getMatchesByRequest,
+    getSkillMatchById,
     updateMatchStatus,
     createReview,
     getReviewsForUser,
+    getReviewByMatchAndAuthor,
     createUserReport,
     getPendingReports,
     updateReportStatus,
@@ -1429,6 +1434,8 @@ export const appRouter = router({
         avatarUrl: ctx.user.avatarUrl,
         loginMethod: ctx.user.loginMethod,
         openId: ctx.user.openId,
+        creditScore: ctx.user.creditScore ?? 100,
+        reportedCount: ctx.user.reportedCount ?? 0,
       };
     }),
 
@@ -1753,7 +1760,12 @@ export const appRouter = router({
 
     updateStatus: protectedProcedure
       .input(z.object({ skillId: z.number(), status: z.enum(["active", "inactive"]) }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
+        const skill = await getSkillById(input.skillId);
+        if (!skill) throw new TRPCError({ code: "NOT_FOUND", message: "技能不存在" });
+        if (skill.userId !== ctx.user.id && ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只能修改自己的技能" });
+        }
         await updateSkillStatus(input.skillId, input.status);
         return { success: true };
       }),
@@ -1806,7 +1818,12 @@ export const appRouter = router({
 
     updateStatus: protectedProcedure
       .input(z.object({ requestId: z.number(), status: z.enum(["open", "matched", "closed"]) }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
+        const request = await getHelpRequestById(input.requestId);
+        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "求助不存在" });
+        if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只能修改自己的求助" });
+        }
         await updateHelpRequestStatus(input.requestId, input.status);
         return { success: true };
       }),
@@ -1814,6 +1831,26 @@ export const appRouter = router({
     match: protectedProcedure
       .input(z.object({ requestId: z.number(), skillId: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        const request = await getHelpRequestById(input.requestId);
+        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "求助不存在" });
+        if (request.userId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "不能接自己的求助" });
+        }
+        if (request.status !== "open") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "该求助已不可接单" });
+        }
+        const skill = await getSkillById(input.skillId);
+        if (!skill) throw new TRPCError({ code: "NOT_FOUND", message: "技能不存在" });
+        if (skill.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只能用自己的技能接单" });
+        }
+        if (skill.status !== "active") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "该技能未启用" });
+        }
+        const creditScore = await getUserCreditScore(ctx.user.id);
+        if (creditScore < 20) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "信用分过低，无法接单" });
+        }
         const id = await createSkillMatch({
           requestId: input.requestId,
           skillId: input.skillId,
@@ -1830,16 +1867,36 @@ export const appRouter = router({
 
     acceptMatch: protectedProcedure
       .input(z.object({ matchId: z.number() }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
+        const match = await getSkillMatchById(input.matchId);
+        if (!match) throw new TRPCError({ code: "NOT_FOUND", message: "匹配不存在" });
+        const request = await getHelpRequestById(match.requestId);
+        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "求助不存在" });
+        if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只有求助发布者可以接受匹配" });
+        }
         await updateMatchStatus(input.matchId, "accepted");
+        await updateHelpRequestStatus(match.requestId, "matched");
+        await updateUserCreditScore(match.providerId, 2);
         return { success: true };
       }),
 
     completeMatch: protectedProcedure
       .input(z.object({ matchId: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        const match = await getSkillMatchById(input.matchId);
+        if (!match) throw new TRPCError({ code: "NOT_FOUND", message: "匹配不存在" });
+        const request = await getHelpRequestById(match.requestId);
+        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "求助不存在" });
+        if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只有求助发布者可以确认完成" });
+        }
+        if (match.status !== "accepted") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "只有已接受的匹配可以完成" });
+        }
         await updateMatchStatus(input.matchId, "completed");
-        await updateUserCreditScore(ctx.user.id, 5);
+        await updateHelpRequestStatus(match.requestId, "closed");
+        await updateUserCreditScore(match.providerId, 5);
         return { success: true };
       }),
   }),
@@ -1854,6 +1911,28 @@ export const appRouter = router({
         comment: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
+        const match = await getSkillMatchById(input.matchId);
+        if (!match) throw new TRPCError({ code: "NOT_FOUND", message: "匹配不存在" });
+        const request = await getHelpRequestById(match.requestId);
+        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "求助不存在" });
+        if (match.status !== "completed") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "完成后才能评价" });
+        }
+        const isRequester = request.userId === ctx.user.id;
+        const isProvider = match.providerId === ctx.user.id;
+        if (!isRequester && !isProvider) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "只有交易双方可以评价" });
+        }
+        if (input.toUserId !== request.userId && input.toUserId !== match.providerId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "评价对象必须是交易另一方" });
+        }
+        if (input.toUserId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "不能评价自己" });
+        }
+        const existing = await getReviewByMatchAndAuthor(input.matchId, ctx.user.id);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: "你已评价过该交易" });
+        }
         const id = await createReview({
           fromUserId: ctx.user.id,
           toUserId: input.toUserId,
@@ -1863,6 +1942,8 @@ export const appRouter = router({
         });
         if (input.rating >= 4) {
           await updateUserCreditScore(input.toUserId, 2);
+        } else if (input.rating <= 2) {
+          await updateUserCreditScore(input.toUserId, -2);
         }
         return { id };
       }),
@@ -1916,6 +1997,7 @@ export const appRouter = router({
         }
         await updateReportStatus(input.reportId, input.action);
         if (input.action === "approved") {
+          await incrementUserReportedCount(input.reportedUserId);
           await updateUserCreditScore(input.reportedUserId, -10);
         }
         return { success: true };

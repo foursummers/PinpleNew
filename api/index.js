@@ -687,6 +687,7 @@ __export(db_exports, {
   getFamilyByInviteCode: () => getFamilyByInviteCode,
   getFamilyMembers: () => getFamilyMembers,
   getFriendEventsFeed: () => getFriendEventsFeed,
+  getHelpRequestById: () => getHelpRequestById,
   getHelpRequestsByUser: () => getHelpRequestsByUser,
   getMatchesByRequest: () => getMatchesByRequest,
   getMemberEventsByFamily: () => getMemberEventsByFamily,
@@ -702,9 +703,12 @@ __export(db_exports, {
   getPendingRequests: () => getPendingRequests,
   getPublicTimelineEventsByFamily: () => getPublicTimelineEventsByFamily,
   getRecommendationChain: () => getRecommendationChain,
+  getReviewByMatchAndAuthor: () => getReviewByMatchAndAuthor,
   getReviewsForUser: () => getReviewsForUser,
   getRoutineTasks: () => getRoutineTasks,
   getRsvpsByEvent: () => getRsvpsByEvent,
+  getSkillById: () => getSkillById,
+  getSkillMatchById: () => getSkillMatchById,
   getSkillsByUser: () => getSkillsByUser,
   getTaskCheckinHistory: () => getTaskCheckinHistory,
   getTaskCheckins: () => getTaskCheckins,
@@ -721,6 +725,7 @@ __export(db_exports, {
   getUserCreditScore: () => getUserCreditScore,
   getUserFamilies: () => getUserFamilies,
   getValidPasswordResetToken: () => getValidPasswordResetToken,
+  incrementUserReportedCount: () => incrementUserReportedCount,
   isUserBlocked: () => isUserBlocked,
   leaveFamilyMember: () => leaveFamilyMember,
   markConnectionUpdated: () => markConnectionUpdated,
@@ -758,7 +763,7 @@ __export(db_exports, {
   upsertUser: () => upsertUser,
   withDbRetry: () => withDbRetry
 });
-import { and, desc, eq, gte, inArray, lt, lte, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
@@ -957,6 +962,11 @@ async function updateUserCreditScore(userId, delta) {
   const newScore = Math.max(0, Math.min(100, currentScore + delta));
   await db.update(users).set({ creditScore: newScore }).where(eq(users.id, userId));
   return newScore;
+}
+async function incrementUserReportedCount(userId) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(users).set({ reportedCount: sql`COALESCE(${users.reportedCount}, 0) + 1` }).where(eq(users.id, userId));
 }
 async function getUserCreditScore(userId) {
   const user = await getUserById(userId);
@@ -1787,6 +1797,12 @@ async function getSkillsByUser(userId) {
   if (!db) return [];
   return db.select().from(skills).where(eq(skills.userId, userId)).orderBy(desc(skills.createdAt));
 }
+async function getSkillById(skillId) {
+  const db = await getDb();
+  if (!db) return void 0;
+  const result = await db.select().from(skills).where(eq(skills.id, skillId)).limit(1);
+  return result[0];
+}
 async function getActiveSkills(limit = 20, offset = 0) {
   const db = await getDb();
   if (!db) return [];
@@ -1807,6 +1823,12 @@ async function getHelpRequestsByUser(userId) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(helpRequests).where(eq(helpRequests.userId, userId)).orderBy(desc(helpRequests.createdAt));
+}
+async function getHelpRequestById(requestId) {
+  const db = await getDb();
+  if (!db) return void 0;
+  const result = await db.select().from(helpRequests).where(eq(helpRequests.id, requestId)).limit(1);
+  return result[0];
 }
 async function getOpenHelpRequests(limit = 20, offset = 0) {
   const db = await getDb();
@@ -1829,6 +1851,12 @@ async function getMatchesByRequest(requestId) {
   if (!db) return [];
   return db.select().from(skillMatches).where(eq(skillMatches.requestId, requestId));
 }
+async function getSkillMatchById(matchId) {
+  const db = await getDb();
+  if (!db) return void 0;
+  const result = await db.select().from(skillMatches).where(eq(skillMatches.id, matchId)).limit(1);
+  return result[0];
+}
 async function updateMatchStatus(matchId, status) {
   const db = await getDb();
   if (!db) return;
@@ -1844,6 +1872,12 @@ async function getReviewsForUser(userId) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(reviews).where(eq(reviews.toUserId, userId)).orderBy(desc(reviews.createdAt));
+}
+async function getReviewByMatchAndAuthor(matchId, fromUserId) {
+  const db = await getDb();
+  if (!db) return void 0;
+  const result = await db.select().from(reviews).where(and(eq(reviews.matchId, matchId), eq(reviews.fromUserId, fromUserId))).limit(1);
+  return result[0];
 }
 async function createUserReport(data) {
   const db = await getDb();
@@ -3698,7 +3732,9 @@ var appRouter = router({
         email: ctx.user.email,
         avatarUrl: ctx.user.avatarUrl,
         loginMethod: ctx.user.loginMethod,
-        openId: ctx.user.openId
+        openId: ctx.user.openId,
+        creditScore: ctx.user.creditScore ?? 100,
+        reportedCount: ctx.user.reportedCount ?? 0
       };
     }),
     findById: protectedProcedure.input(z2.object({ userId: z2.number() })).query(async ({ input }) => {
@@ -3957,7 +3993,12 @@ var appRouter = router({
     mySkills: protectedProcedure.query(async ({ ctx }) => {
       return getSkillsByUser(ctx.user.id);
     }),
-    updateStatus: protectedProcedure.input(z2.object({ skillId: z2.number(), status: z2.enum(["active", "inactive"]) })).mutation(async ({ input }) => {
+    updateStatus: protectedProcedure.input(z2.object({ skillId: z2.number(), status: z2.enum(["active", "inactive"]) })).mutation(async ({ ctx, input }) => {
+      const skill = await getSkillById(input.skillId);
+      if (!skill) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6280\u80FD\u4E0D\u5B58\u5728" });
+      if (skill.userId !== ctx.user.id && ctx.user.role !== "admin") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u80FD\u4FEE\u6539\u81EA\u5DF1\u7684\u6280\u80FD" });
+      }
       await updateSkillStatus(input.skillId, input.status);
       return { success: true };
     })
@@ -4000,11 +4041,36 @@ var appRouter = router({
     myRequests: protectedProcedure.query(async ({ ctx }) => {
       return getHelpRequestsByUser(ctx.user.id);
     }),
-    updateStatus: protectedProcedure.input(z2.object({ requestId: z2.number(), status: z2.enum(["open", "matched", "closed"]) })).mutation(async ({ input }) => {
+    updateStatus: protectedProcedure.input(z2.object({ requestId: z2.number(), status: z2.enum(["open", "matched", "closed"]) })).mutation(async ({ ctx, input }) => {
+      const request = await getHelpRequestById(input.requestId);
+      if (!request) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6C42\u52A9\u4E0D\u5B58\u5728" });
+      if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u80FD\u4FEE\u6539\u81EA\u5DF1\u7684\u6C42\u52A9" });
+      }
       await updateHelpRequestStatus(input.requestId, input.status);
       return { success: true };
     }),
     match: protectedProcedure.input(z2.object({ requestId: z2.number(), skillId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const request = await getHelpRequestById(input.requestId);
+      if (!request) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6C42\u52A9\u4E0D\u5B58\u5728" });
+      if (request.userId === ctx.user.id) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u4E0D\u80FD\u63A5\u81EA\u5DF1\u7684\u6C42\u52A9" });
+      }
+      if (request.status !== "open") {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u8BE5\u6C42\u52A9\u5DF2\u4E0D\u53EF\u63A5\u5355" });
+      }
+      const skill = await getSkillById(input.skillId);
+      if (!skill) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6280\u80FD\u4E0D\u5B58\u5728" });
+      if (skill.userId !== ctx.user.id) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u80FD\u7528\u81EA\u5DF1\u7684\u6280\u80FD\u63A5\u5355" });
+      }
+      if (skill.status !== "active") {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u8BE5\u6280\u80FD\u672A\u542F\u7528" });
+      }
+      const creditScore = await getUserCreditScore(ctx.user.id);
+      if (creditScore < 20) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u4FE1\u7528\u5206\u8FC7\u4F4E\uFF0C\u65E0\u6CD5\u63A5\u5355" });
+      }
       const id = await createSkillMatch({
         requestId: input.requestId,
         skillId: input.skillId,
@@ -4015,13 +4081,33 @@ var appRouter = router({
     matchesByRequest: protectedProcedure.input(z2.object({ requestId: z2.number() })).query(async ({ input }) => {
       return getMatchesByRequest(input.requestId);
     }),
-    acceptMatch: protectedProcedure.input(z2.object({ matchId: z2.number() })).mutation(async ({ input }) => {
+    acceptMatch: protectedProcedure.input(z2.object({ matchId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const match = await getSkillMatchById(input.matchId);
+      if (!match) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5339\u914D\u4E0D\u5B58\u5728" });
+      const request = await getHelpRequestById(match.requestId);
+      if (!request) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6C42\u52A9\u4E0D\u5B58\u5728" });
+      if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u6C42\u52A9\u53D1\u5E03\u8005\u53EF\u4EE5\u63A5\u53D7\u5339\u914D" });
+      }
       await updateMatchStatus(input.matchId, "accepted");
+      await updateHelpRequestStatus(match.requestId, "matched");
+      await updateUserCreditScore(match.providerId, 2);
       return { success: true };
     }),
     completeMatch: protectedProcedure.input(z2.object({ matchId: z2.number() })).mutation(async ({ ctx, input }) => {
+      const match = await getSkillMatchById(input.matchId);
+      if (!match) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5339\u914D\u4E0D\u5B58\u5728" });
+      const request = await getHelpRequestById(match.requestId);
+      if (!request) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6C42\u52A9\u4E0D\u5B58\u5728" });
+      if (request.userId !== ctx.user.id && ctx.user.role !== "admin") {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u6C42\u52A9\u53D1\u5E03\u8005\u53EF\u4EE5\u786E\u8BA4\u5B8C\u6210" });
+      }
+      if (match.status !== "accepted") {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u53EA\u6709\u5DF2\u63A5\u53D7\u7684\u5339\u914D\u53EF\u4EE5\u5B8C\u6210" });
+      }
       await updateMatchStatus(input.matchId, "completed");
-      await updateUserCreditScore(ctx.user.id, 5);
+      await updateHelpRequestStatus(match.requestId, "closed");
+      await updateUserCreditScore(match.providerId, 5);
       return { success: true };
     })
   }),
@@ -4033,6 +4119,28 @@ var appRouter = router({
       rating: z2.number().min(1).max(5),
       comment: z2.string().optional()
     })).mutation(async ({ ctx, input }) => {
+      const match = await getSkillMatchById(input.matchId);
+      if (!match) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5339\u914D\u4E0D\u5B58\u5728" });
+      const request = await getHelpRequestById(match.requestId);
+      if (!request) throw new TRPCError3({ code: "NOT_FOUND", message: "\u6C42\u52A9\u4E0D\u5B58\u5728" });
+      if (match.status !== "completed") {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u5B8C\u6210\u540E\u624D\u80FD\u8BC4\u4EF7" });
+      }
+      const isRequester = request.userId === ctx.user.id;
+      const isProvider = match.providerId === ctx.user.id;
+      if (!isRequester && !isProvider) {
+        throw new TRPCError3({ code: "FORBIDDEN", message: "\u53EA\u6709\u4EA4\u6613\u53CC\u65B9\u53EF\u4EE5\u8BC4\u4EF7" });
+      }
+      if (input.toUserId !== request.userId && input.toUserId !== match.providerId) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u8BC4\u4EF7\u5BF9\u8C61\u5FC5\u987B\u662F\u4EA4\u6613\u53E6\u4E00\u65B9" });
+      }
+      if (input.toUserId === ctx.user.id) {
+        throw new TRPCError3({ code: "BAD_REQUEST", message: "\u4E0D\u80FD\u8BC4\u4EF7\u81EA\u5DF1" });
+      }
+      const existing = await getReviewByMatchAndAuthor(input.matchId, ctx.user.id);
+      if (existing) {
+        throw new TRPCError3({ code: "CONFLICT", message: "\u4F60\u5DF2\u8BC4\u4EF7\u8FC7\u8BE5\u4EA4\u6613" });
+      }
       const id = await createReview({
         fromUserId: ctx.user.id,
         toUserId: input.toUserId,
@@ -4042,6 +4150,8 @@ var appRouter = router({
       });
       if (input.rating >= 4) {
         await updateUserCreditScore(input.toUserId, 2);
+      } else if (input.rating <= 2) {
+        await updateUserCreditScore(input.toUserId, -2);
       }
       return { id };
     }),
@@ -4085,6 +4195,7 @@ var appRouter = router({
       }
       await updateReportStatus(input.reportId, input.action);
       if (input.action === "approved") {
+        await incrementUserReportedCount(input.reportedUserId);
         await updateUserCreditScore(input.reportedUserId, -10);
       }
       return { success: true };
