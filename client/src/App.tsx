@@ -7,6 +7,19 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
+import {
+  MOCK_BABY_PROFILE,
+  MOCK_FAMILY_EVENTS,
+  MOCK_FAMILY_MEMBERS,
+  MOCK_FAMILY_TASKS,
+  MOCK_FRIENDS,
+  MOCK_HANDBOOKS,
+  MOCK_MATCH_RECOMMENDATIONS,
+  MOCK_MESSAGES,
+  MOCK_OPPORTUNITIES,
+  MOCK_USER,
+  PINPLE_ASSETS,
+} from "./pinpleMockData";
 
 // ─── tRPC Client ──────────────────────────────────────────────────────────────
 // credentials: "include" ensures the session cookie is sent on every request,
@@ -171,38 +184,38 @@ const CSS = `
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* ── AURA dark palette ── */
-  --c-bg: #05070C;
-  --c-bg-raised: #0A0E18;
-  --c-surface: #0E1320;
-  --c-surface2: #161C2D;
-  --c-glass: rgba(255,255,255,0.04);
-  --c-glass-strong: rgba(255,255,255,0.08);
+  /* ── pinple yellow dark tokens ── */
+  --c-bg: #0F1115;
+  --c-bg-raised: #12161B;
+  --c-surface: rgba(255,255,255,0.045);
+  --c-surface2: #161A20;
+  --c-glass: rgba(255,255,255,0.045);
+  --c-glass-strong: rgba(255,215,106,0.08);
   --c-border: rgba(255,255,255,0.08);
-  --c-border2: rgba(255,255,255,0.14);
-  --c-ink: #E8ECF5;
-  --c-ink2: rgba(232,236,245,0.62);
-  --c-ink3: rgba(232,236,245,0.38);
-  --c-accent: #4A88FF;
-  --c-accent-soft: #6DA1FF;
-  --c-accent-light: rgba(74,136,255,0.14);
-  --c-accent2: #E6A554;
-  --c-accent2-light: rgba(230,165,84,0.14);
-  --c-rose: #FF5A6A;
-  --c-rose-light: rgba(255,90,106,0.14);
-  --c-amber: #E6A554;
-  --c-amber-light: rgba(230,165,84,0.14);
-  --c-ok: #5FD9A0;
-  --c-ok-light: rgba(95,217,160,0.14);
-  --ff-display: 'Space Grotesk', 'Instrument Serif', system-ui, sans-serif;
-  --ff-body: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
+  --c-border2: rgba(255,255,255,0.12);
+  --c-yellow-border: rgba(255,215,106,0.22);
+  --c-ink: #F7F4EA;
+  --c-ink2: #A8A29A;
+  --c-ink3: #6F6A61;
+  --c-accent: #FFD76A;
+  --c-accent-soft: #FFB84D;
+  --c-accent-light: rgba(255,215,106,0.11);
+  --c-accent2: #FFF3C2;
+  --c-accent2-light: rgba(255,243,194,0.10);
+  --c-rose: #FF6B6B;
+  --c-rose-light: rgba(255,107,107,0.13);
+  --c-amber: #FFB84D;
+  --c-amber-light: rgba(255,184,77,0.13);
+  --c-ok: #8FD694;
+  --c-ok-light: rgba(143,214,148,0.13);
+  --ff-display: 'JetBrains Mono', 'Source Han Sans SC', system-ui, sans-serif;
+  --ff-body: 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --ff-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
-  --r: 14px; --r-lg: 20px; --r-xl: 28px;
-  --shadow: 0 10px 30px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.35);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
-  --aura-glow: radial-gradient(900px 520px at 12% -10%, rgba(74,136,255,0.14), transparent 60%),
-               radial-gradient(620px 360px at 108% 20%, rgba(74,136,255,0.08), transparent 55%),
-               radial-gradient(520px 300px at 50% 120%, rgba(230,165,84,0.06), transparent 60%);
+  --r: 20px; --r-lg: 24px; --r-xl: 28px;
+  --shadow: 0 18px 42px rgba(0,0,0,0.28);
+  --shadow-sm: 0 1px 0 rgba(255,255,255,0.04), 0 12px 28px rgba(0,0,0,0.20);
+  --aura-glow: radial-gradient(circle at 30% 20%, rgba(255,215,106,0.10), transparent 45%),
+               radial-gradient(circle at 80% 10%, rgba(255,184,77,0.08), transparent 40%);
 }
 
 html { scroll-behavior: smooth; }
@@ -223,7 +236,7 @@ body::before {
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(255,215,106,0.035) 1px, transparent 1px);
   background-size: 4px 4px;
   opacity: 0.4;
   mix-blend-mode: screen;
@@ -232,9 +245,9 @@ body::before {
 
 /* ── Layout ── */
 .app-shell { display: flex; min-height: 100vh; }
-.sidebar { width: 240px; flex-shrink: 0; background: var(--c-surface); border-right: 1px solid var(--c-border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.sidebar { width: 240px; flex-shrink: 0; background: rgba(15,17,21,0.76); border-right: 1px solid var(--c-border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
 .main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.topbar { background: var(--c-surface); border-bottom: 1px solid var(--c-border); padding: 0 28px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.topbar { background: rgba(15,17,21,0.72); border-bottom: 1px solid var(--c-border); padding: 0 28px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
 .page-body { flex: 1; padding: 32px 32px 80px; max-width: 960px; }
 
 /* ── Sidebar ── */
@@ -243,17 +256,17 @@ body::before {
 .logo-mark span { color: var(--c-accent); }
 .logo-sub { font-size: 11px; color: var(--c-ink3); margin-top: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
 .sidebar-family { margin: 0 12px 8px; }
-.family-pill { background: var(--c-accent-light); border: 1px solid rgba(74,136,255,0.32); border-radius: var(--r); padding: 10px 12px; cursor: pointer; transition: all 0.15s; }
-.family-pill:hover { background: rgba(74,136,255,0.22); border-color: rgba(74,136,255,0.48); }
+.family-pill { background: var(--c-accent-light); border: 1px solid var(--c-yellow-border); border-radius: var(--r); padding: 10px 12px; cursor: pointer; transition: all 0.15s; }
+.family-pill:hover { background: var(--c-glass-strong); border-color: rgba(255,215,106,0.42); transform: translateY(-1px); }
 .family-pill-name { font-size: 13px; font-weight: 600; color: var(--c-accent); }
 .family-pill-code { font-size: 11px; color: var(--c-ink3); margin-top: 1px; }
 .sidebar-nav { flex: 1; padding: 4px 12px; }
 .nav-section { margin-bottom: 20px; }
 .nav-section-label { font-size: 10px; font-weight: 600; color: var(--c-ink3); letter-spacing: 1px; text-transform: uppercase; padding: 0 8px; margin-bottom: 4px; }
-.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: var(--r); cursor: pointer; transition: all 0.12s; color: var(--c-ink2); font-size: 14px; font-weight: 400; border: none; background: transparent; width: 100%; text-align: left; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 999px; cursor: pointer; transition: all 0.16s; color: var(--c-ink2); font-size: 14px; font-weight: 400; border: 1px solid transparent; background: transparent; width: 100%; text-align: left; }
 .nav-item:hover { background: var(--c-surface2); color: var(--c-ink); }
-.nav-item.active { background: var(--c-accent-light); color: var(--c-accent); font-weight: 500; }
-.nav-item .nav-icon { font-size: 16px; width: 20px; text-align: center; flex-shrink: 0; }
+.nav-item.active { background: var(--c-accent-light); color: var(--c-accent); font-weight: 600; border-color: var(--c-yellow-border); }
+.nav-item .nav-icon { width: 20px; height: 20px; text-align: center; flex-shrink: 0; color: currentColor; }
 .nav-badge { margin-left: auto; background: var(--c-accent); color: white; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 10px; }
 .sidebar-bottom { padding: 16px 12px; border-top: 1px solid var(--c-border); }
 .user-chip { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r); cursor: pointer; }
@@ -264,12 +277,14 @@ body::before {
 .user-email { font-size: 11px; color: var(--c-ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── Mobile ── */
-.mobile-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(14,19,32,0.82); backdrop-filter: blur(18px) saturate(180%); -webkit-backdrop-filter: blur(18px) saturate(180%); border-top: 1px solid var(--c-border); z-index: 200; padding: 6px 0 env(safe-area-inset-bottom, 0); }
+.mobile-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; background: rgba(15,17,21,0.82); backdrop-filter: blur(18px) saturate(180%); -webkit-backdrop-filter: blur(18px) saturate(180%); border-top: 1px solid var(--c-border); z-index: 200; padding: 6px 0 env(safe-area-inset-bottom, 0); }
 .mobile-nav-items { display: flex; justify-content: space-around; }
 .mobile-nav-btn { flex: 1; background: transparent; border: none; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; cursor: pointer; color: var(--c-ink3); font-family: var(--ff-body); transition: color 0.12s; }
 .mobile-nav-btn.active { color: var(--c-accent); }
-.mobile-nav-btn .mn-icon { font-size: 20px; line-height: 1; }
+.mobile-nav-btn .mn-icon { width: 22px; height: 22px; line-height: 1; color: currentColor; }
 .mobile-nav-btn span { font-size: 10px; font-weight: 500; }
+.mobile-nav-btn.publish .mn-icon { width: 46px; height: 46px; margin-top: -22px; border-radius: 999px; background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft)); color: #111; display: grid; place-items: center; box-shadow: 0 12px 30px rgba(255,184,77,.25); }
+.mobile-nav-btn.publish.active .mn-icon { outline: 2px solid rgba(255,243,194,.35); }
 .topbar-hamburger { display: none; background: transparent; border: none; cursor: pointer; padding: 4px; color: var(--c-ink2); }
 .mobile-sidebar { display: none; position: fixed; inset: 0; z-index: 300; }
 .mobile-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.3); }
@@ -285,7 +300,8 @@ body::before {
 }
 
 /* ── Cards ── */
-.card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-lg); padding: 20px 24px; box-shadow: var(--shadow-sm); }
+.card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-lg); padding: 20px 24px; box-shadow: var(--shadow-sm); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.card:hover { border-color: rgba(255,215,106,0.18); }
 .card-sm { padding: 14px 16px; }
 .card + .card { margin-top: 12px; }
 
@@ -295,9 +311,9 @@ body::before {
 .page-subtitle { font-size: 14px; color: var(--c-ink3); margin-top: 4px; }
 
 /* ── Hero card (family dashboard) ── */
-.hero-card { background: linear-gradient(135deg, #1A2540 0%, #0E1628 55%, #0A1020 100%); color: #EAF0FF; border: 1px solid rgba(74,136,255,0.24); border-radius: var(--r-xl); padding: 28px 32px; margin-bottom: 24px; position: relative; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06); }
-.hero-card::before { content: ''; position: absolute; top: -80px; right: -80px; width: 260px; height: 260px; background: radial-gradient(circle, rgba(74,136,255,0.45), transparent 70%); border-radius: 50%; filter: blur(12px); }
-.hero-card::after { content: ''; position: absolute; bottom: -40px; left: 40px; width: 140px; height: 140px; background: radial-gradient(circle, rgba(230,165,84,0.22), transparent 70%); border-radius: 50%; filter: blur(8px); }
+.hero-card { background: linear-gradient(135deg, rgba(255,215,106,0.12), rgba(255,255,255,0.045) 46%, rgba(255,184,77,0.08)); color: var(--c-ink); border: 1px solid var(--c-yellow-border); border-radius: var(--r-xl); padding: 28px 32px; margin-bottom: 24px; position: relative; overflow: hidden; box-shadow: var(--shadow-sm); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+.hero-card::before { content: ''; position: absolute; top: -90px; right: -80px; width: 260px; height: 260px; background: radial-gradient(circle, rgba(255,215,106,0.16), transparent 70%); border-radius: 50%; filter: blur(10px); }
+.hero-card::after { content: ''; position: absolute; bottom: -70px; left: 40px; width: 180px; height: 180px; background: radial-gradient(circle, rgba(255,184,77,0.10), transparent 70%); border-radius: 50%; filter: blur(8px); }
 .hero-title { font-family: var(--ff-display); font-size: 22px; font-weight: 700; margin-bottom: 4px; }
 .hero-sub { font-size: 13px; opacity: 0.8; }
 .hero-stats { display: flex; gap: 20px; margin-top: 20px; }
@@ -313,6 +329,22 @@ body::before {
 .stat-value.accent { color: var(--c-accent); }
 .stat-value.amber { color: var(--c-accent2); }
 .stat-note { font-size: 11px; color: var(--c-ink3); margin-top: 3px; }
+
+/* ── pinple product surfaces ── */
+.pinple-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.feature-card { position: relative; overflow: hidden; min-height: 128px; padding: 18px; border-radius: 24px; background: var(--c-surface); border: 1px solid var(--c-border); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); transition: all .18s ease; }
+.feature-card:hover { transform: translateY(-2px); border-color: var(--c-yellow-border); background: var(--c-glass-strong); }
+.feature-icon { width: 36px; height: 36px; border-radius: 14px; display: grid; place-items: center; color: var(--c-accent); background: var(--c-accent-light); border: 1px solid var(--c-yellow-border); margin-bottom: 14px; }
+.feature-title { font-size: 15px; font-weight: 700; color: var(--c-ink); }
+.feature-desc { font-size: 12px; color: var(--c-ink2); margin-top: 4px; line-height: 1.6; }
+.network-map { position: relative; min-height: 220px; border-radius: 28px; overflow: hidden; background: radial-gradient(circle at 50% 45%, rgba(255,215,106,0.12), transparent 42%), var(--c-surface); border: 1px solid var(--c-border); }
+.network-line { position: absolute; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,215,106,.35), transparent); transform-origin: left center; }
+.network-node { position: absolute; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; background: #FFF3C2; border: 2px solid rgba(255,215,106,.75); box-shadow: 0 0 0 6px rgba(255,215,106,.08); color: #111; font-weight: 800; font-size: 12px; }
+.network-node.core { width: 62px; height: 62px; left: calc(50% - 31px); top: calc(50% - 31px); background: linear-gradient(135deg, #FFF3C2, #FFD76A); }
+.avatar-stack { display: flex; align-items: center; }
+.avatar-stack > * { margin-left: -8px; }
+.avatar-stack > *:first-child { margin-left: 0; }
+.mock-hero-mascot { position: absolute; right: 20px; bottom: 8px; opacity: .92; filter: drop-shadow(0 16px 28px rgba(255,184,77,.14)); }
 
 /* ── Timeline ── */
 .timeline { position: relative; }
@@ -396,11 +428,11 @@ body::before {
 .field label { display: block; font-size: 13px; font-weight: 500; color: var(--c-ink2); margin-bottom: 6px; }
 .field input { width: 100%; padding: 11px 14px; border: 1.5px solid var(--c-border2); border-radius: var(--r); font-family: var(--ff-body); font-size: 15px; background: var(--c-surface); color: var(--c-ink); outline: none; transition: border-color 0.15s; }
 .field input:focus { border-color: var(--c-accent); }
-.btn-primary { width: 100%; padding: 13px; background: linear-gradient(135deg, var(--c-accent) 0%, var(--c-accent-soft) 100%); color: white; border: none; border-radius: var(--r); font-family: var(--ff-body); font-size: 15px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; transition: all 0.18s; margin-top: 4px; box-shadow: 0 8px 24px rgba(74,136,255,0.28); }
-.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(74,136,255,0.38); }
+.btn-primary { width: 100%; padding: 13px; background: linear-gradient(135deg, var(--c-accent) 0%, var(--c-accent-soft) 100%); color: #111111; border: none; border-radius: 999px; font-family: var(--ff-body); font-size: 15px; font-weight: 700; letter-spacing: 0.02em; cursor: pointer; transition: all 0.18s; margin-top: 4px; box-shadow: 0 8px 24px rgba(255,184,77,0.18); }
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(255,184,77,0.24); }
 .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
-.btn-outline { padding: 9px 18px; background: var(--c-glass); color: var(--c-ink); border: 1px solid var(--c-border2); border-radius: var(--r); font-family: var(--ff-body); font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
-.btn-outline:hover { background: var(--c-glass-strong); border-color: rgba(74,136,255,0.42); color: var(--c-accent-soft); }
+.btn-outline { padding: 9px 18px; background: var(--c-glass); color: var(--c-ink); border: 1px solid var(--c-border2); border-radius: 999px; font-family: var(--ff-body); font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.btn-outline:hover { background: var(--c-glass-strong); border-color: var(--c-yellow-border); color: var(--c-accent); transform: translateY(-2px); }
 .btn-sm { padding: 7px 14px; font-size: 13px; border-radius: 8px; }
 .alert { padding: 11px 14px; border-radius: var(--r); font-size: 13px; margin-bottom: 12px; }
 .alert-error { background: var(--c-rose-light); color: var(--c-rose); border: 1px solid rgba(255,90,106,0.28); }
@@ -408,12 +440,12 @@ body::before {
 .divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; font-size: 12px; color: var(--c-ink3); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--c-border2); }
 
-/* ── AURA Auth Screen Overrides (scoped to .auth-screen) ── */
+/* ── pinple Auth Screen Overrides (scoped to .auth-screen) ── */
 .auth-screen {
   position: relative;
   min-height: 100vh;
-  background: #030407;
-  color: #FFFFFF;
+  background: #0F1115;
+  color: var(--c-ink);
   font-family: 'Space Grotesk', 'DM Sans', system-ui, sans-serif;
   overflow: hidden;
   padding: 24px;
@@ -423,11 +455,9 @@ body::before {
   position: absolute;
   inset: -10%;
   background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
-    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
-  filter: blur(20px);
+    radial-gradient(circle at 30% 20%, rgba(255,215,106,0.10), transparent 45%),
+    radial-gradient(circle at 80% 10%, rgba(255,184,77,0.08), transparent 40%);
+  filter: blur(8px);
   animation: auraSweep 14s ease-in-out infinite alternate;
   pointer-events: none;
   z-index: 0;
@@ -436,7 +466,7 @@ body::before {
   content: '';
   position: absolute;
   inset: 0;
-  background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(255,215,106,0.035) 1px, transparent 1px);
   background-size: 3px 3px;
   opacity: 0.55;
   mix-blend-mode: screen;
@@ -469,7 +499,7 @@ body::before {
   width: 100%;
   max-width: 460px;
   margin: 0 auto;
-  background: rgba(255,255,255,0.035);
+  background: rgba(255,255,255,0.045);
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 40px;
   padding: 44px 40px;
@@ -478,7 +508,7 @@ body::before {
   gap: 26px;
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 40px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08);
+  box-shadow: 0 24px 54px rgba(0,0,0,0.30), inset 0 1px 0 rgba(255,255,255,0.08);
 }
 
 .auth-screen .auth-logo { text-align: left; margin-bottom: 0; }
@@ -487,15 +517,15 @@ body::before {
   font-size: 34px;
   font-weight: 500;
   letter-spacing: -0.02em;
-  color: #fff;
+  color: var(--c-ink);
 }
-.auth-screen .auth-logo-mark span { color: rgba(255,255,255,0.55); font-weight: 300; }
+.auth-screen .auth-logo-mark span { color: var(--c-accent); font-weight: 500; }
 
 .auth-system-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: rgba(255,255,255,0.85);
-  background: rgba(255,255,255,0.08);
+  color: #111;
+  background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft));
   padding: 5px 12px;
   border-radius: 999px;
   align-self: flex-start;
@@ -508,11 +538,11 @@ body::before {
   font-weight: 500;
   letter-spacing: -0.02em;
   line-height: 1.15;
-  color: #fff;
+  color: var(--c-ink);
   margin-top: 10px;
 }
 .auth-subtitle {
-  color: rgba(255,255,255,0.5);
+  color: var(--c-ink2);
   font-size: 14px;
   font-weight: 400;
   margin-top: 6px;
@@ -540,10 +570,10 @@ body::before {
 }
 .auth-screen .auth-tab:hover { color: rgba(255,255,255,0.85); }
 .auth-screen .auth-tab.active {
-  background: #FFFFFF;
-  color: #030407;
+  background: var(--c-accent-light);
+  color: var(--c-accent);
   font-weight: 600;
-  box-shadow: 0 0 24px rgba(255,255,255,0.22);
+  box-shadow: inset 0 0 0 1px var(--c-yellow-border);
 }
 
 .auth-sso-grid {
@@ -632,8 +662,8 @@ body::before {
   padding: 0;
   margin: 0;
   border-radius: 999px;
-  background: #FFFFFF;
-  color: #030407;
+  background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft));
+  color: #111111;
   font-family: 'Space Grotesk', sans-serif;
   font-size: 15px;
   font-weight: 600;
@@ -645,13 +675,13 @@ body::before {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  box-shadow: 0 0 40px rgba(255,255,255,0.18);
+  box-shadow: 0 10px 28px rgba(255,184,77,0.18);
   transition: all .2s ease;
 }
 .auth-screen .btn-primary:hover:not(:disabled) {
-  background: #E0EDFF;
+  background: linear-gradient(135deg, #FFF3C2, var(--c-accent));
   transform: translateY(-2px);
-  box-shadow: 0 0 60px rgba(224,237,255,0.34);
+  box-shadow: 0 14px 34px rgba(255,184,77,0.24);
 }
 .auth-screen .btn-primary:disabled {
   opacity: 0.55;
@@ -721,7 +751,7 @@ body::before {
   .auth-tech-label.tr, .auth-tech-label.br { display: none; }
 }
 
-/* ── AURA Boot Screen (shares aura bg with auth screen) ── */
+/* ── pinple Boot Screen (shares yellow dark bg with auth screen) ── */
 .aura-boot {
   position: relative;
   min-height: 100vh;
@@ -739,11 +769,9 @@ body::before {
   position: absolute;
   inset: -10%;
   background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 16% 46%, rgba(255,255,255,0.18), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.14), transparent 50%),
-    radial-gradient(700px 320px at 92% 20%, rgba(74,136,255,0.10), transparent 60%);
-  filter: blur(20px);
+    radial-gradient(circle at 30% 20%, rgba(255,215,106,0.10), transparent 45%),
+    radial-gradient(circle at 80% 10%, rgba(255,184,77,0.08), transparent 40%);
+  filter: blur(8px);
   animation: auraSweep 14s ease-in-out infinite alternate;
   pointer-events: none;
   z-index: 0;
@@ -828,7 +856,7 @@ body::before {
   position: absolute;
   inset: 0;
   width: 40%;
-  background: linear-gradient(90deg, transparent, rgba(74,136,255,0.9), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255,215,106,0.9), transparent);
   animation: auraBootBar 1.6s ease-in-out infinite;
 }
 @keyframes auraBootBar {
@@ -859,7 +887,7 @@ body::before {
 .task-btn { margin-top: 12px; width: 100%; padding: 8px; background: var(--c-surface2); border: none; border-radius: 8px; font-family: var(--ff-body); font-size: 13px; cursor: pointer; font-weight: 500; transition: background 0.12s; }
 .task-btn:hover { background: var(--c-border2); }
 
-/* ── Family selector (AURA) ── */
+/* ── Family selector (pinple) ── */
 .family-select-screen {
   position: relative;
   min-height: 100vh;
@@ -874,10 +902,9 @@ body::before {
   position: absolute;
   inset: -10%;
   background:
-    radial-gradient(900px 520px at 12% 50%, rgba(74,136,255,0.22), transparent 60%),
-    radial-gradient(620px 360px at 84% 20%, rgba(230,165,84,0.10), transparent 55%),
-    radial-gradient(460px 240px at 22% 55%, rgba(200,220,255,0.08), transparent 50%);
-  filter: blur(20px);
+    radial-gradient(circle at 30% 20%, rgba(255,215,106,0.10), transparent 45%),
+    radial-gradient(circle at 80% 10%, rgba(255,184,77,0.08), transparent 40%);
+  filter: blur(8px);
   animation: auraSweep 18s ease-in-out infinite alternate;
   pointer-events: none;
   z-index: 0;
@@ -933,10 +960,10 @@ body::before {
   justify-content: space-between;
 }
 .family-option:hover {
-  border-color: rgba(74,136,255,0.5);
-  background: rgba(74,136,255,0.12);
+  border-color: rgba(255,215,106,0.42);
+  background: rgba(255,215,106,0.10);
   transform: translateY(-1px);
-  box-shadow: 0 12px 32px rgba(74,136,255,0.18);
+  box-shadow: 0 12px 32px rgba(255,184,77,0.14);
 }
 .family-option-name { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: 0.01em; }
 .family-option-code { font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 3px; font-family: var(--ff-mono); letter-spacing: 0.05em; }
@@ -978,11 +1005,11 @@ body::before {
 .btn-ghost:hover { background: var(--c-glass); color: var(--c-ink); }
 
 /* ── Invite banner ── */
-.invite-banner { background: var(--c-accent-light); border: 1px solid rgba(74,136,255,0.28); border-radius: var(--r); padding: 14px 18px; display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.invite-banner { background: var(--c-accent-light); border: 1px solid var(--c-yellow-border); border-radius: var(--r); padding: 14px 18px; display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
 .invite-code { font-family: var(--ff-mono); font-size: 18px; font-weight: 700; color: var(--c-accent-soft); letter-spacing: 2px; }
 .invite-label { font-size: 12px; color: var(--c-ink3); margin-bottom: 2px; }
-.btn-copy { background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft)); color: white; border: none; padding: 6px 14px; border-radius: 8px; font-family: var(--ff-body); font-size: 13px; cursor: pointer; flex-shrink: 0; transition: all 0.15s; box-shadow: 0 4px 16px rgba(74,136,255,0.28); }
-.btn-copy:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(74,136,255,0.4); }
+.btn-copy { background: linear-gradient(135deg, var(--c-accent), var(--c-accent-soft)); color: #111; border: none; padding: 6px 14px; border-radius: 999px; font-family: var(--ff-body); font-size: 13px; font-weight: 700; cursor: pointer; flex-shrink: 0; transition: all 0.15s; box-shadow: 0 4px 16px rgba(255,184,77,0.18); }
+.btn-copy:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(255,184,77,0.25); }
 
 /* ── Section label ── */
 .section-label { font-size: 12px; font-weight: 600; color: var(--c-ink3); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; }
@@ -1048,6 +1075,37 @@ function Spinner() {
 
 function AlertMsg({ type, msg }: { type: "error" | "success"; msg: string }) {
   return <div className={`alert alert-${type}`}>{msg}</div>;
+}
+
+function AssetIcon({ src, size = 20 }: { src: string; size?: number }) {
+  if (src.includes("/icons/")) {
+    return (
+      <span
+        aria-hidden
+        style={{
+          display: "block",
+          width: size,
+          height: size,
+          backgroundColor: "currentColor",
+          WebkitMask: `url(${src}) center / contain no-repeat`,
+          mask: `url(${src}) center / contain no-repeat`,
+        }}
+      />
+    );
+  }
+  return <img src={src} alt="" width={size} height={size} style={{ display: "block" }} />;
+}
+
+function Mascot({ src, size = 88 }: { src: string; size?: number }) {
+  return <img src={src} alt="" width={size} height={size} style={{ display: "block", objectFit: "contain" }} />;
+}
+
+function WarmAvatar({ src, name, size = 42 }: { src?: string; name: string; size?: number }) {
+  return src ? (
+    <img src={src} alt={name} width={size} height={size} style={{ borderRadius: "50%", border: "1px solid var(--c-yellow-border)", background: "#FFF3C2" }} />
+  ) : (
+    <div className="avatar" style={{ width: size, height: size, background: "linear-gradient(135deg, #FFD76A, #FFB84D)", color: "#111" }}>{name.slice(0, 1)}</div>
+  );
 }
 
 // ─── Auth Screen ──────────────────────────────────────────────────────────────
@@ -1406,7 +1464,7 @@ function FamilySelector({ user, onSelect }: { user: User; onSelect: (f: Family) 
       <div className="family-select-inner fade-up">
         <div className="family-select-badge">WORKSPACE</div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: getAvatarColor(user.openId), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontWeight: 700, fontSize: 15, boxShadow: "0 8px 24px rgba(74,136,255,0.28)" }}>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg, #FFD76A, #FFB84D)", display: "flex", alignItems: "center", justifyContent: "center", color: "#111", fontWeight: 700, fontSize: 15, boxShadow: "0 8px 24px rgba(255,184,77,0.18)" }}>
             {getInitials(user.name, user.email)}
           </div>
           <div>
@@ -1470,15 +1528,17 @@ function DashboardPage({ family, user, children, tasks }: { family: Family; user
   const eddDate = child?.eddInfo?.twin37w || child?.eddInfo?.edd;
   const daysLeft = daysUntil(eddDate?.toString());
   const totalCheckins = tasks.reduce((s, t) => s + t.todayCheckins, 0);
+  const firstName = user.name || MOCK_USER.name;
 
   return (
     <div className="fade-up">
       <div className="hero-card">
+        <Mascot src={PINPLE_ASSETS.illustrations.heart} size={116} />
+        <div className="mock-hero-mascot"><Mascot src={PINPLE_ASSETS.illustrations.happy} size={118} /></div>
         <div style={{ position: "relative", zIndex: 1 }}>
-          <div className="hero-title">{family.name} 👶</div>
+          <div className="hero-title">下午好，{firstName}</div>
           <div className="hero-sub">
-            {children.map(c => c.childOneName || c.nickname).filter(Boolean).join(" & ") || "家庭管理中心"}
-            {child?.isMultiple && " · 龙凤胎 DCDA"}
+            连接你重要的人 · 管理关系、机会与家庭温度
           </div>
           <div className="hero-stats">
             {pg && (
@@ -1494,10 +1554,71 @@ function DashboardPage({ family, user, children, tasks }: { family: Family; user
               </div>
             )}
             <div className="hero-stat">
-              <div className="hero-stat-val">{totalCheckins}</div>
-              <div className="hero-stat-label">今日打卡</div>
+              <div className="hero-stat-val">{user.creditScore ?? MOCK_USER.creditScore}</div>
+              <div className="hero-stat-label">人脉信用分</div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="section-label">核心入口</div>
+      <div className="pinple-grid" style={{ marginBottom: 24 }}>
+        {[
+          { title: "人脉", desc: "七度熟人圈与共同好友", icon: PINPLE_ASSETS.icons.network },
+          { title: "机会", desc: "兼职、项目合作、资源互助", icon: PINPLE_ASSETS.icons.opportunity },
+          { title: "家庭", desc: "大事件、任务与成长记录", icon: PINPLE_ASSETS.icons.family },
+          { title: "玄学", desc: "趣味匹配与赛博月老", icon: PINPLE_ASSETS.icons.astrology },
+        ].map((item) => (
+          <div className="feature-card" key={item.title}>
+            <div className="feature-icon"><AssetIcon src={item.icon} /></div>
+            <div className="feature-title">{item.title}</div>
+            <div className="feature-desc">{item.desc}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="section-label">你的人脉网络</div>
+      <div className="network-map" style={{ marginBottom: 24 }}>
+        <div className="network-line" style={{ left: "50%", top: "50%", width: "150px", transform: "rotate(-24deg)" }} />
+        <div className="network-line" style={{ left: "50%", top: "50%", width: "130px", transform: "rotate(30deg)" }} />
+        <div className="network-line" style={{ left: "50%", top: "50%", width: "155px", transform: "rotate(160deg)" }} />
+        <div className="network-line" style={{ left: "50%", top: "50%", width: "112px", transform: "rotate(210deg)" }} />
+        <div className="network-node core"><Mascot src={PINPLE_ASSETS.illustrations.happy} size={48} /></div>
+        {MOCK_FRIENDS.map((f, i) => {
+          const pos = [
+            ["18%", "18%"], ["75%", "18%"], ["78%", "68%"], ["19%", "66%"], ["48%", "14%"],
+          ][i];
+          return <div className="network-node" key={f.name} style={{ left: pos[0], top: pos[1] }}>{f.name.slice(0, 1)}</div>;
+        })}
+      </div>
+
+      <div className="pinple-grid" style={{ marginBottom: 24 }}>
+        <div className="card">
+          <div className="section-label">今日推荐机会</div>
+          {MOCK_OPPORTUNITIES.slice(0, 2).map(o => (
+            <div key={o.title} className="list-item" style={{ paddingLeft: 0, paddingRight: 0 }}>
+              <div className="list-item-title">{o.title}</div>
+              <div className="list-item-meta">{o.chain} · 可信度 {o.trust}%</div>
+            </div>
+          ))}
+        </div>
+        <div className="card">
+          <div className="section-label">家庭提醒</div>
+          {MOCK_FAMILY_EVENTS.slice(0, 2).map(e => (
+            <div key={e.title} className="list-item" style={{ paddingLeft: 0, paddingRight: 0 }}>
+              <div className="list-item-title">{e.title}</div>
+              <div className="list-item-meta">{e.date} · {e.type}</div>
+            </div>
+          ))}
+        </div>
+        <div className="card">
+          <div className="section-label">关系动态</div>
+          {MOCK_MESSAGES.slice(0, 2).map(m => (
+            <div key={m.text} className="list-item" style={{ paddingLeft: 0, paddingRight: 0 }}>
+              <div className="list-item-title">{m.from}</div>
+              <div className="list-item-meta">{m.text}</div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -1743,6 +1864,16 @@ function ManualPage({ children }: { children: Child[] }) {
         </div>
       </div>
 
+      <div className="pinple-grid" style={{ marginBottom: 24 }}>
+        {MOCK_HANDBOOKS.map(book => (
+          <div className="feature-card" key={book.title}>
+            <div className="feature-icon"><AssetIcon src={(PINPLE_ASSETS.icons as any)[book.icon]} /></div>
+            <div className="feature-title">{book.title}</div>
+            <div className="feature-desc">{book.count} 条内容 · {book.updated}</div>
+          </div>
+        ))}
+      </div>
+
       <div className="tab-bar">
         {[
           { k: "timeline", l: "📅 孕期" },
@@ -1853,7 +1984,7 @@ function ManualPage({ children }: { children: Child[] }) {
               ))}
             </div>
           ))}
-          <div className="card" style={{ background: "var(--c-accent-light)", border: "1px solid rgba(74,136,255,0.28)" }}>
+          <div className="card" style={{ background: "var(--c-accent-light)", border: "1px solid var(--c-yellow-border)" }}>
             <div style={{ fontWeight: 600, color: "var(--c-accent-soft)", marginBottom: 4 }}>📍 最近医院</div>
             <div style={{ fontSize: 14, color: "var(--c-ink)" }}>南山区人民医院（南山医院）</div>
             <div style={{ fontSize: 12, color: "var(--c-ink3)", marginTop: 3 }}>桃园路89号 · 急诊：0755-26553111</div>
@@ -2058,7 +2189,15 @@ function ConnectionsPage({ user }: { user: User }) {
     }
   };
 
-  const grouped = connections.reduce((acc: Record<string, any[]>, c) => {
+  const visibleConnections = connections.length > 0 ? connections : MOCK_FRIENDS.map((f, i) => ({
+    id: -i - 1,
+    friendId: i + 2,
+    friend: { name: f.name },
+    category: ["life", "work", "family", "kids", "life"][i],
+    note: `${f.distance} · 强度 ${f.strength}% · ${f.reason}`,
+    mock: true,
+  }));
+  const grouped = visibleConnections.reduce((acc: Record<string, any[]>, c) => {
     const key = c.category || "life";
     acc[key] = acc[key] || [];
     acc[key].push(c);
@@ -2114,9 +2253,14 @@ function ConnectionsPage({ user }: { user: User }) {
               ))}
             </div>
           )}
-          {connections.length === 0 ? (
-            <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无人脉，先搜索添加一个朋友</div>
-          ) : Object.entries(grouped).map(([cat, rows]) => (
+          <div className="network-map" style={{ marginBottom: 12 }}>
+            <div className="network-node core"><Mascot src={PINPLE_ASSETS.illustrations.networkLink} size={48} /></div>
+            {MOCK_FRIENDS.map((f, i) => {
+              const pos = [["16%","24%"],["76%","18%"],["74%","68%"],["18%","68%"],["48%","14%"]][i];
+              return <div className="network-node" key={f.name} style={{ left: pos[0], top: pos[1] }}>{f.name.slice(0,1)}</div>;
+            })}
+          </div>
+          {Object.entries(grouped).map(([cat, rows]) => (
             <div className="card" style={{ padding: 0, marginBottom: 12 }} key={cat}>
               <div className="list-item">
                 <div className="list-item-title">{categoryName[cat] || cat}</div>
@@ -2128,7 +2272,7 @@ function ConnectionsPage({ user }: { user: User }) {
                     <div className="list-item-title">{c.friend?.name || `用户 ${c.friendId}`}</div>
                     <div className="list-item-meta">ID {c.friendId} {c.note ? `· ${c.note}` : ""}</div>
                   </div>
-                  <button className="btn-outline btn-sm" onClick={() => remove(c.id)}>删除</button>
+                  {!c.mock && <button className="btn-outline btn-sm" onClick={() => remove(c.id)}>删除</button>}
                 </div>
               ))}
             </div>
@@ -2168,11 +2312,14 @@ function CalendarPage({ family }: { family: Family }) {
         <div className="page-title">家庭日历</div>
         <div className="page-subtitle">聚合活动、生日纪念日、孕期和成长里程碑</div>
       </div>
-      {loading ? <Spinner /> : items.length === 0 ? (
-        <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>未来 90 天暂无日程</div>
-      ) : (
+      {loading ? <Spinner /> : (
         <div className="card" style={{ padding: 0 }}>
-          {items.map((it, idx) => (
+          {(items.length > 0 ? items : MOCK_FAMILY_EVENTS.map((e, idx) => ({
+            kind: idx === 0 ? "birthday" : "event",
+            refId: -idx - 1,
+            title: e.title,
+            date: new Date(Date.now() + (idx + 1) * 7 * 86400000).toISOString(),
+          }))).map((it, idx) => (
             <div className="list-item" key={`${it.kind}-${it.refId}-${idx}`}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                 <div>
@@ -2260,6 +2407,25 @@ function MarketPage({ user }: { user: User }) {
   };
 
   const CATS: Record<string, string> = { education: "教育", childcare: "育儿", housekeeping: "家政", tech: "技术", other: "其他" };
+  const visibleSkills = skills.length > 0 ? skills : MOCK_OPPORTUNITIES.map((o, i) => ({
+    id: -i - 1,
+    name: o.title,
+    category: o.type,
+    location: o.location,
+    priceMin: o.reward,
+    priceMax: "",
+    description: `${o.chain} · 推荐人 ${o.recommender} · 可信度 ${o.trust}%`,
+  }));
+  const visibleRequests = requests.length > 0 ? requests : MOCK_OPPORTUNITIES.map((o, i) => ({
+    id: -i - 1,
+    title: o.title,
+    description: `${o.type} · ${o.reward} · ${o.time}`,
+    location: o.location,
+    urgency: i === 0 ? "high" : i === 1 ? "medium" : "low",
+    status: "open",
+    userId: 999,
+    mock: true,
+  }));
 
   return (
     <div className="fade-up">
@@ -2283,9 +2449,8 @@ function MarketPage({ user }: { user: User }) {
       {loading ? <Spinner /> : (
         <>
           {tab === "skills" && (
-            skills.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无技能发布</div> :
             <div className="card" style={{ padding: 0 }}>
-              {skills.map((s, i) => (
+              {visibleSkills.map((s, i) => (
                 <div key={i} className="list-item">
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
@@ -2300,9 +2465,8 @@ function MarketPage({ user }: { user: User }) {
             </div>
           )}
           {tab === "requests" && (
-            requests.length === 0 ? <div style={{ padding: "48px 0", textAlign: "center", color: "var(--c-ink3)" }}>暂无求助发布</div> :
             <div className="card" style={{ padding: 0 }}>
-              {requests.map((r, i) => (
+              {visibleRequests.map((r, i) => (
                 <div key={i} className="list-item">
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
                     <div className="list-item-title">{r.title}</div>
@@ -2312,11 +2476,12 @@ function MarketPage({ user }: { user: User }) {
                   </div>
                   <div className="list-item-meta">{r.location}</div>
                   {r.description && <div className="list-item-desc">{r.description}</div>}
-                  {r.userId !== user.id && r.status === "open" && (
+                  {r.userId !== user.id && r.status === "open" && !r.mock && (
                     <button className="btn-outline btn-sm" style={{ marginTop: 10 }} onClick={() => acceptRequest(r.id)}>
                       用我的技能接单
                     </button>
                   )}
+                  {r.mock && <button className="btn-outline btn-sm" style={{ marginTop: 10 }}>联系推荐人</button>}
                 </div>
               ))}
             </div>
@@ -2487,16 +2652,137 @@ function ProfilePage({ user, family, onLogout, onSwitchFamily }: { user: User; f
   );
 }
 
+function YuelaoPage() {
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">赛博月老</div>
+        <div className="page-subtitle">趣味匹配 + 熟人介绍 + 关系可信</div>
+      </div>
+      <div className="hero-card" style={{ minHeight: 180 }}>
+        <div style={{ position: "relative", zIndex: 1, maxWidth: 520 }}>
+          <div className="hero-title">读懂关系的温度</div>
+          <div className="hero-sub">婚恋介绍、室友介绍、朋友介绍、八字合婚、星座匹配都以熟人链路为基础。</div>
+        </div>
+        <div className="mock-hero-mascot"><Mascot src={PINPLE_ASSETS.illustrations.cyberYuelao} size={140} /></div>
+      </div>
+      <div className="pinple-grid">
+        {MOCK_MATCH_RECOMMENDATIONS.map(item => (
+          <div className="feature-card" key={item.title}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div className="feature-icon"><AssetIcon src={PINPLE_ASSETS.icons.match} /></div>
+              <span className="pill pill-amber">{item.score}%</span>
+            </div>
+            <div className="feature-title">{item.title}</div>
+            <div className="feature-desc">{item.path}</div>
+            <div className="list-item-meta" style={{ marginTop: 10 }}>{item.reason}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MaternityFamilyPage() {
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">母婴家庭</div>
+        <div className="page-subtitle">成长记录、任务分配、大事件、健康与家人共同参与</div>
+      </div>
+      <div className="hero-card">
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div className="hero-title">{MOCK_BABY_PROFILE.name}</div>
+          <div className="hero-sub">{MOCK_BABY_PROFILE.age} · 身高 {MOCK_BABY_PROFILE.height} · 体重 {MOCK_BABY_PROFILE.weight}</div>
+          <div className="hero-stats">
+            <div className="hero-stat"><div className="hero-stat-val">{MOCK_BABY_PROFILE.growthRecords}</div><div className="hero-stat-label">成长记录</div></div>
+            <div className="hero-stat"><div className="hero-stat-val">{MOCK_BABY_PROFILE.mediaCount}</div><div className="hero-stat-label">照片视频</div></div>
+          </div>
+        </div>
+        <div className="mock-hero-mascot"><Mascot src={PINPLE_ASSETS.illustrations.babyGrowth} size={136} /></div>
+      </div>
+      <div className="section-label">家庭成员</div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="avatar-stack">
+          {MOCK_FAMILY_MEMBERS.map(m => <WarmAvatar key={m.name} src={m.avatar} name={m.name} size={54} />)}
+        </div>
+      </div>
+      <div className="section-label">今日家庭任务</div>
+      <div className="pinple-grid">
+        {MOCK_FAMILY_TASKS.map(task => (
+          <div className="feature-card" key={task}>
+            <div className="feature-icon"><AssetIcon src={PINPLE_ASSETS.icons.task} /></div>
+            <div className="feature-title">{task}</div>
+            <div className="feature-desc">已分配给家庭成员，完成后同步到成长记录</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MessagesPage() {
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">消息</div>
+        <div className="page-subtitle">朋友、家庭和机会提醒</div>
+      </div>
+      <div className="card" style={{ padding: 0 }}>
+        {MOCK_MESSAGES.map(m => (
+          <div className="list-item" key={m.text}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <WarmAvatar name={m.from} size={42} />
+              <div style={{ flex: 1 }}>
+                <div className="list-item-title">{m.from}</div>
+                <div className="list-item-meta">{m.text}</div>
+              </div>
+              <span className="list-item-meta">{m.time}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PublishPage() {
+  return (
+    <div className="fade-up">
+      <div className="page-header">
+        <div className="page-title">发布</div>
+        <div className="page-subtitle">发布机会、求助、成长记录或家庭事件</div>
+      </div>
+      <div className="pinple-grid">
+        {[
+          { title: "发布机会", desc: "工作推荐、兼职、项目合作", icon: PINPLE_ASSETS.icons.opportunity },
+          { title: "发起求助", desc: "技能服务、资源互助、生活互助", icon: PINPLE_ASSETS.icons.help },
+          { title: "记录成长", desc: "照片、文字、大事件", icon: PINPLE_ASSETS.icons.baby },
+          { title: "家庭事件", desc: "生日、旅行、搬家、纪念日", icon: PINPLE_ASSETS.icons.event },
+        ].map(item => (
+          <div className="feature-card" key={item.title}>
+            <div className="feature-icon"><AssetIcon src={item.icon} /></div>
+            <div className="feature-title">{item.title}</div>
+            <div className="feature-desc">{item.desc}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ──────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { id: "home", icon: "🏠", label: "首页" },
-  { id: "children", icon: "👶", label: "宝宝" },
-  { id: "manual", icon: "📖", label: "手册" },
-  { id: "tasks", icon: "✅", label: "打卡" },
-  { id: "connections", icon: "👥", label: "人脉" },
-  { id: "calendar", icon: "🗓", label: "日历" },
-  { id: "market", icon: "🛍", label: "市场" },
-  { id: "profile", icon: "👤", label: "我的" },
+  { id: "home", icon: PINPLE_ASSETS.icons.family, label: "首页" },
+  { id: "connections", icon: PINPLE_ASSETS.icons.network, label: "人脉" },
+  { id: "market", icon: PINPLE_ASSETS.icons.opportunity, label: "机会" },
+  { id: "publish", icon: PINPLE_ASSETS.icons.addFriend, label: "发布", publish: true },
+  { id: "yuelao", icon: PINPLE_ASSETS.icons.match, label: "月老" },
+  { id: "maternity", icon: PINPLE_ASSETS.icons.baby, label: "母婴" },
+  { id: "manual", icon: PINPLE_ASSETS.icons.handbook, label: "手册" },
+  { id: "calendar", icon: PINPLE_ASSETS.icons.timeline, label: "日历" },
+  { id: "messages", icon: PINPLE_ASSETS.icons.message, label: "消息" },
+  { id: "profile", icon: PINPLE_ASSETS.icons.profile, label: "我的" },
 ];
 
 // ─── Error Boundary ───────────────────────────────────────────────────────────
@@ -2592,7 +2878,7 @@ function AppInner() {
     setUser(null); setFamily(null);
   };
 
-  // Loading state — shares the AURA look of the auth screen so the app feels cohesive.
+  // Loading state shares the pinple yellow dark look of the auth screen.
   if (user === undefined) {
     const secs = Math.floor(bootElapsed / 1000);
     const statusText =
@@ -2607,7 +2893,7 @@ function AppInner() {
       <div className="aura-boot">
         <style>{CSS}</style>
         <div className="aura-boot-inner">
-          <div className="aura-boot-badge">PINPLE · AURA SYSTEM</div>
+          <div className="aura-boot-badge">PINPLE · RELATION SYSTEM</div>
           <div className="aura-boot-mark">pin<span>ple</span></div>
           <div className="aura-boot-bar" />
           <div className="aura-boot-status">
@@ -2638,6 +2924,10 @@ function AppInner() {
       case "connections": return <ConnectionsPage user={user} />;
       case "calendar": return <CalendarPage family={family} />;
       case "market": return <MarketPage user={user} />;
+      case "publish": return <PublishPage />;
+      case "yuelao": return <YuelaoPage />;
+      case "maternity": return <MaternityFamilyPage />;
+      case "messages": return <MessagesPage />;
       case "profile": return <ProfilePage user={user} family={family} onLogout={handleLogout} onSwitchFamily={() => setFamily(null)} />;
       default: return <DashboardPage family={family} user={user} children={children} tasks={tasks} />;
     }
@@ -2661,7 +2951,7 @@ function AppInner() {
           {NAV_ITEMS.map(item => (
             <button key={item.id} className={`nav-item ${page === item.id ? "active" : ""}`}
               onClick={() => { setPage(item.id); setSidebarOpen(false); }}>
-              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-icon"><AssetIcon src={item.icon} /></span>
               {item.label}
             </button>
           ))}
@@ -2692,8 +2982,9 @@ function AppInner() {
             <button className="topbar-hamburger" onClick={() => setSidebarOpen(true)}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
             </button>
-            <div style={{ fontFamily: "var(--ff-display)", fontSize: 18, fontWeight: 700, color: "var(--c-ink)" }}>
-              {NAV_ITEMS.find(n => n.id === page)?.icon} {NAV_ITEMS.find(n => n.id === page)?.label}
+            <div style={{ fontFamily: "var(--ff-display)", fontSize: 18, fontWeight: 700, color: "var(--c-ink)", display: "flex", alignItems: "center", gap: 8 }}>
+              {NAV_ITEMS.find(n => n.id === page)?.icon && <AssetIcon src={NAV_ITEMS.find(n => n.id === page)!.icon} />}
+              {NAV_ITEMS.find(n => n.id === page)?.label}
             </div>
             <div className="avatar" style={{ background: getAvatarColor(user.openId), cursor: "pointer" }} onClick={() => setPage("profile")}>
               {getInitials(user.name, user.email)}
@@ -2708,8 +2999,8 @@ function AppInner() {
         <nav className="mobile-nav">
           <div className="mobile-nav-items">
             {NAV_ITEMS.map(item => (
-              <button key={item.id} className={`mobile-nav-btn ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}>
-                <span className="mn-icon">{item.icon}</span>
+              <button key={item.id} className={`mobile-nav-btn ${(item as any).publish ? "publish" : ""} ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}>
+                <span className="mn-icon"><AssetIcon src={item.icon} size={(item as any).publish ? 26 : 22} /></span>
                 <span>{item.label}</span>
               </button>
             ))}
