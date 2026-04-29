@@ -45,6 +45,14 @@ import {
   getUserFamilies,
   removeFamilyMember,
   updateChild,
+  getFamilyMembersWithDetails,
+  getChildGrowthRecord,
+  getFamilyTasksByAssignee,
+  getTaskCompletionStats,
+  checkInFamilyTask,
+  getFamilyContributionLeaderboard,
+  getChildTimelineEvents,
+  getFamilyInfoWithCounts,
   setChildShareCard,
   getChildByShareToken,
   updateEvent,
@@ -59,6 +67,10 @@ import {
   acceptConnection,
   removeConnection,
   getMyConnections,
+  getSecondDegreeConnections,
+  getRecommendationChainForTarget,
+  getUserInfluenceScore,
+  getUserNetworkStats,
   getPendingRequests,
   getUserByUserId,
   checkExistingConnection,
@@ -118,6 +130,7 @@ import {
     updateHelpRequestStatus,
     createSkillMatch,
     getMatchesByRequest,
+    getMatchesForHelpRequest,
     getSkillMatchById,
     updateMatchStatus,
     createReview,
@@ -130,6 +143,10 @@ import {
     unblockUser,
     getBlockedUsers,
     isUserBlocked,
+    getUserAstrologyProfile,
+    calculateCompatibility,
+    getMatchingRecommendations,
+    saveMatchingRecord,
   } from "./db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -498,6 +515,101 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         await assertFamilyMember(input.familyId, ctx.user.id);
         return getFamilyMembers(input.familyId);
+      }),
+
+    membersWithDetails: protectedProcedure
+      .input(z.object({ familyId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        return getFamilyMembersWithDetails(input.familyId);
+      }),
+
+    tasksByAssignee: protectedProcedure
+      .input(z.object({ familyId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        return getFamilyTasksByAssignee(input.familyId);
+      }),
+
+    taskStats: protectedProcedure
+      .input(z.object({ familyId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        return getTaskCompletionStats(input.familyId);
+      }),
+
+    checkInTask: protectedProcedure
+      .input(z.object({
+        taskId: z.number(),
+        completedBy: z.number().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const completedBy = input.completedBy ?? ctx.user.id;
+        const checkinId = await checkInFamilyTask(input.taskId, completedBy, input.notes);
+        return { success: true, checkinId };
+      }),
+
+    leaderboard: protectedProcedure
+      .input(z.object({ familyId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        return getFamilyContributionLeaderboard(input.familyId);
+      }),
+
+    childTimeline: protectedProcedure
+      .input(z.object({ childId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const child = await getChildById(input.childId);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND", message: "孩子不存在" });
+        await assertFamilyMember(child.familyId, ctx.user.id);
+        return getChildTimelineEvents(input.childId);
+      }),
+
+    childGrowth: protectedProcedure
+      .input(z.object({ childId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const child = await getChildById(input.childId);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND", message: "孩子不存在" });
+        await assertFamilyMember(child.familyId, ctx.user.id);
+        return getChildGrowthRecord(input.childId);
+      }),
+
+    updateChild: protectedProcedure
+      .input(z.object({
+        childId: z.number(),
+        nickname: z.string().min(1).max(50).optional(),
+        fullName: z.string().max(100).optional().nullable(),
+        gender: z.enum(["girl", "boy", "unknown"]).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const child = await getChildById(input.childId);
+        if (!child) throw new TRPCError({ code: "NOT_FOUND", message: "孩子不存在" });
+        await assertFamilyCollaboratorOrAdmin(child.familyId, ctx.user.id);
+        const { childId, ...data } = input;
+        await updateChild(childId, data);
+        return { success: true };
+      }),
+
+    addMember: protectedProcedure
+      .input(z.object({
+        familyId: z.number(),
+        userId: z.number(),
+        role: z.enum(["admin", "collaborator", "observer"]).default("observer"),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await assertFamilyAdmin(input.familyId, ctx.user.id);
+        const existing = await getMemberRole(input.familyId, input.userId);
+        if (existing) throw new TRPCError({ code: "CONFLICT", message: "该用户已是家庭成员" });
+        await addFamilyMember({ familyId: input.familyId, userId: input.userId, role: input.role });
+        return { success: true };
+      }),
+
+    info: protectedProcedure
+      .input(z.object({ familyId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        await assertFamilyMember(input.familyId, ctx.user.id);
+        return getFamilyInfoWithCounts(input.familyId);
       }),
 
     updateMemberRole: protectedProcedure
@@ -1547,6 +1659,81 @@ export const appRouter = router({
         return searchUsersByName(input.query, ctx.user.id);
       }),
 
+    secondDegree: protectedProcedure.query(async ({ ctx }) => {
+      return getSecondDegreeConnections(ctx.user.id);
+    }),
+
+    recommendationChain: protectedProcedure
+      .input(z.object({ targetUserId: z.number() }))
+      .query(async ({ input }) => {
+        return getRecommendationChainForTarget(input.targetUserId);
+      }),
+
+    createRecommendation: protectedProcedure
+      .input(z.object({
+        userId: z.number(),
+        targetUserId: z.number(),
+        context: z.string().max(255).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const id = await createRecommendation({
+          userId: input.userId,
+          recommenderId: ctx.user.id,
+          targetUserId: input.targetUserId,
+          context: input.context,
+        });
+        return { id };
+      }),
+
+    influenceScore: protectedProcedure.query(async ({ ctx }) => {
+      return getUserInfluenceScore(ctx.user.id);
+    }),
+
+    networkStats: protectedProcedure.query(async ({ ctx }) => {
+      return getUserNetworkStats(ctx.user.id);
+    }),
+
+    helpRequests: router({
+      create: protectedProcedure
+        .input(z.object({
+          title: z.string().min(1).max(255),
+          description: z.string().optional(),
+          category: z.string().optional(),
+          targetSkills: z.array(z.string()).optional(),
+        }))
+        .mutation(async ({ ctx, input }) => {
+          const skillTags = input.targetSkills?.length
+            ? input.targetSkills
+            : input.category
+              ? [input.category]
+              : [];
+          const id = await createHelpRequest({
+            userId: ctx.user.id,
+            title: input.title,
+            description: input.description,
+            skillTags: JSON.stringify(skillTags),
+            status: "open",
+          });
+          return { id };
+        }),
+
+      open: publicProcedure
+        .input(z.object({ limit: z.number().min(1).max(50).default(20) }))
+        .query(async ({ input }) => {
+          return getOpenHelpRequests(input.limit, 0);
+        }),
+
+      myRequests: protectedProcedure.query(async ({ ctx }) => {
+        return getHelpRequestsByUser(ctx.user.id);
+      }),
+
+      matches: protectedProcedure
+        .input(z.object({ helpRequestId: z.number() }))
+        .query(async ({ input }) => {
+          return getMatchesForHelpRequest(input.helpRequestId);
+        }),
+    }),
+
     // Get connection status and mutual friends between me and another user
     statusWith: protectedProcedure
       .input(z.object({ targetUserId: z.number() }))
@@ -1680,6 +1867,43 @@ export const appRouter = router({
     byAge: publicProcedure
       .input(z.object({ ageMonths: z.number() }))
       .query(({ input }) => getMilestonesByAge(input.ageMonths)),
+  }),
+
+  // ─── Astrology / Cyber Matchmaker 赛博月老 ─────────────────────────
+  astrology: router({
+    profile: protectedProcedure
+      .input(z.object({ userId: z.number().optional() }))
+      .query(async ({ ctx, input }) => {
+        return getUserAstrologyProfile(input.userId ?? ctx.user.id);
+      }),
+
+    compatibility: protectedProcedure
+      .input(z.object({ userId1: z.number(), userId2: z.number() }))
+      .query(async ({ input }) => {
+        return calculateCompatibility(input.userId1, input.userId2);
+      }),
+
+    recommendations: protectedProcedure
+      .input(z.object({ limit: z.number().min(1).max(30).default(10) }))
+      .query(async ({ ctx, input }) => {
+        return getMatchingRecommendations(ctx.user.id, input.limit);
+      }),
+
+    saveMatch: protectedProcedure
+      .input(z.object({
+        userId1: z.number(),
+        userId2: z.number(),
+        compatibilityScore: z.number().min(0).max(100),
+        details: z.record(z.string(), z.unknown()).default({}),
+      }))
+      .mutation(async ({ input }) => {
+        return saveMatchingRecord(
+          input.userId1,
+          input.userId2,
+          input.compatibilityScore,
+          input.details,
+        );
+      }),
   }),
 
   // ═══════════════════════════════════════════════════════════════════════

@@ -17,7 +17,8 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit generate && drizzle-kit migrate"
+    "db:push": "drizzle-kit generate && drizzle-kit migrate",
+    "db:seed:erin": "node scripts/seed-erin-family.mjs"
   },
   "dependencies": {
     "@trpc/client": "^11.6.0",

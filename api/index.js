@@ -642,8 +642,10 @@ __export(db_exports, {
   addTaskCheckinWithValue: () => addTaskCheckinWithValue,
   blockUser: () => blockUser,
   buildDbConfig: () => buildDbConfig,
+  calculateCompatibility: () => calculateCompatibility,
   checkExistingConnection: () => checkExistingConnection,
   checkExistingJoinRequest: () => checkExistingJoinRequest,
+  checkInFamilyTask: () => checkInFamilyTask,
   clearConnectionUpdate: () => clearConnectionUpdate,
   createChild: () => createChild,
   createEmailUser: () => createEmailUser,
@@ -674,6 +676,8 @@ __export(db_exports, {
   getBlockedUsers: () => getBlockedUsers,
   getChildById: () => getChildById,
   getChildByShareToken: () => getChildByShareToken,
+  getChildGrowthRecord: () => getChildGrowthRecord,
+  getChildTimelineEvents: () => getChildTimelineEvents,
   getChildrenByFamily: () => getChildrenByFamily,
   getConnectionBetween: () => getConnectionBetween,
   getDb: () => getDb,
@@ -685,11 +689,17 @@ __export(db_exports, {
   getEventsByFamily: () => getEventsByFamily,
   getFamilyById: () => getFamilyById,
   getFamilyByInviteCode: () => getFamilyByInviteCode,
+  getFamilyContributionLeaderboard: () => getFamilyContributionLeaderboard,
+  getFamilyInfoWithCounts: () => getFamilyInfoWithCounts,
   getFamilyMembers: () => getFamilyMembers,
+  getFamilyMembersWithDetails: () => getFamilyMembersWithDetails,
+  getFamilyTasksByAssignee: () => getFamilyTasksByAssignee,
   getFriendEventsFeed: () => getFriendEventsFeed,
   getHelpRequestById: () => getHelpRequestById,
   getHelpRequestsByUser: () => getHelpRequestsByUser,
   getMatchesByRequest: () => getMatchesByRequest,
+  getMatchesForHelpRequest: () => getMatchesForHelpRequest,
+  getMatchingRecommendations: () => getMatchingRecommendations,
   getMemberEventsByFamily: () => getMemberEventsByFamily,
   getMemberEventsByUser: () => getMemberEventsByUser,
   getMemberRole: () => getMemberRole,
@@ -703,10 +713,12 @@ __export(db_exports, {
   getPendingRequests: () => getPendingRequests,
   getPublicTimelineEventsByFamily: () => getPublicTimelineEventsByFamily,
   getRecommendationChain: () => getRecommendationChain,
+  getRecommendationChainForTarget: () => getRecommendationChainForTarget,
   getReviewByMatchAndAuthor: () => getReviewByMatchAndAuthor,
   getReviewsForUser: () => getReviewsForUser,
   getRoutineTasks: () => getRoutineTasks,
   getRsvpsByEvent: () => getRsvpsByEvent,
+  getSecondDegreeConnections: () => getSecondDegreeConnections,
   getSkillById: () => getSkillById,
   getSkillMatchById: () => getSkillMatchById,
   getSkillsByUser: () => getSkillsByUser,
@@ -714,16 +726,20 @@ __export(db_exports, {
   getTaskCheckins: () => getTaskCheckins,
   getTaskCheckinsByDate: () => getTaskCheckinsByDate,
   getTaskCheckinsByMonth: () => getTaskCheckinsByMonth,
+  getTaskCompletionStats: () => getTaskCompletionStats,
   getTaskFrequencyStats: () => getTaskFrequencyStats,
   getTimelineEvents: () => getTimelineEvents,
   getTodayCheckins: () => getTodayCheckins,
   getUpcomingTimelineByFamily: () => getUpcomingTimelineByFamily,
+  getUserAstrologyProfile: () => getUserAstrologyProfile,
   getUserByEmail: () => getUserByEmail,
   getUserById: () => getUserById,
   getUserByOpenId: () => getUserByOpenId,
   getUserByUserId: () => getUserByUserId,
   getUserCreditScore: () => getUserCreditScore,
   getUserFamilies: () => getUserFamilies,
+  getUserInfluenceScore: () => getUserInfluenceScore,
+  getUserNetworkStats: () => getUserNetworkStats,
   getValidPasswordResetToken: () => getValidPasswordResetToken,
   incrementUserReportedCount: () => incrementUserReportedCount,
   isUserBlocked: () => isUserBlocked,
@@ -733,6 +749,7 @@ __export(db_exports, {
   removeConnection: () => removeConnection,
   removeFamilyMember: () => removeFamilyMember,
   resetDb: () => resetDb,
+  saveMatchingRecord: () => saveMatchingRecord,
   searchUsersByName: () => searchUsersByName,
   sendConnectionRequest: () => sendConnectionRequest,
   setChildShareCard: () => setChildShareCard,
@@ -834,7 +851,7 @@ async function getDb() {
   }
   return _db;
 }
-async function ensureSchema(_db2) {
+async function ensureSchema(dbRef) {
   if (!process.env.DATABASE_URL) return;
   const startedAt = Date.now();
   let conn = null;
@@ -1112,6 +1129,143 @@ async function updateChild(id, data) {
   if (!db) return;
   await db.update(children).set(data).where(eq(children.id, id));
 }
+async function getFamilyMembersWithDetails(familyId) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    memberId: familyMembers.id,
+    userId: familyMembers.userId,
+    role: familyMembers.role,
+    nickname: familyMembers.nickname,
+    name: users.name,
+    email: users.email,
+    bio: users.bio,
+    location: users.location,
+    avatarUrl: users.avatarUrl,
+    joinedAt: familyMembers.joinedAt,
+    birthDate: familyMembers.birthDate,
+    anniversaryDate: familyMembers.anniversaryDate
+  }).from(familyMembers).leftJoin(users, eq(familyMembers.userId, users.id)).where(eq(familyMembers.familyId, familyId)).orderBy(desc(familyMembers.joinedAt));
+}
+async function getChildGrowthRecord(childId) {
+  const db = await getDb();
+  if (!db) return null;
+  const child = await db.select().from(children).where(eq(children.id, childId)).limit(1);
+  if (!child[0]) return null;
+  const tasks = await db.select({
+    taskId: routineTasks.id,
+    title: routineTasks.title,
+    category: routineTasks.category,
+    assignedTo: routineTasks.assignedTo,
+    isActive: routineTasks.isActive,
+    todayCheckins: sql`count(${taskCheckins.id})`
+  }).from(routineTasks).leftJoin(
+    taskCheckins,
+    and(
+      eq(taskCheckins.taskId, routineTasks.id),
+      gte(taskCheckins.checkedAt, /* @__PURE__ */ new Date((/* @__PURE__ */ new Date()).toISOString().slice(0, 10) + "T00:00:00.000Z"))
+    )
+  ).where(eq(routineTasks.childId, childId)).groupBy(
+    routineTasks.id,
+    routineTasks.title,
+    routineTasks.category,
+    routineTasks.assignedTo,
+    routineTasks.isActive
+  ).orderBy(desc(routineTasks.createdAt));
+  return { ...child[0], tasks };
+}
+async function getFamilyTasksByAssignee(familyId) {
+  const db = await getDb();
+  if (!db) return {};
+  const rows = await db.select({
+    taskId: routineTasks.id,
+    title: routineTasks.title,
+    description: routineTasks.description,
+    category: routineTasks.category,
+    assignedTo: routineTasks.assignedTo,
+    assigneeName: users.name,
+    childId: routineTasks.childId,
+    childName: children.nickname,
+    isActive: routineTasks.isActive,
+    createdAt: routineTasks.createdAt
+  }).from(routineTasks).leftJoin(users, eq(routineTasks.assignedTo, users.id)).leftJoin(children, eq(routineTasks.childId, children.id)).where(eq(routineTasks.familyId, familyId)).orderBy(desc(routineTasks.createdAt));
+  return rows.reduce(
+    (acc, task) => {
+      const assigneeName = task.assigneeName || "\u672A\u5206\u914D";
+      if (!acc[assigneeName]) acc[assigneeName] = [];
+      acc[assigneeName].push(task);
+      return acc;
+    },
+    {}
+  );
+}
+async function getTaskCompletionStats(familyId) {
+  const db = await getDb();
+  if (!db) return { totalTasks: 0, completed: 0, completionRate: 0 };
+  const [totalRows, completedRows] = await Promise.all([
+    db.select({ count: sql`count(*)` }).from(routineTasks).where(eq(routineTasks.familyId, familyId)),
+    db.select({ count: sql`count(distinct ${taskCheckins.taskId})` }).from(taskCheckins).innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id)).where(eq(routineTasks.familyId, familyId))
+  ]);
+  const totalTasks = Number(totalRows[0]?.count || 0);
+  const completed = Number(completedRows[0]?.count || 0);
+  return {
+    totalTasks,
+    completed,
+    completionRate: totalTasks > 0 ? Math.round(completed / totalTasks * 100) : 0
+  };
+}
+async function checkInFamilyTask(taskId, completedBy, notes) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const task = await db.select().from(routineTasks).where(eq(routineTasks.id, taskId)).limit(1);
+  if (!task[0]) throw new Error("Task not found");
+  const result = await db.insert(taskCheckins).values({
+    taskId,
+    childId: task[0].childId,
+    checkedBy: completedBy,
+    note: notes
+  });
+  return result[0].insertId;
+}
+async function getFamilyContributionLeaderboard(familyId) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    userId: users.id,
+    name: users.name,
+    email: users.email,
+    avatarUrl: users.avatarUrl,
+    tasksCompleted: sql`count(${taskCheckins.id})`
+  }).from(taskCheckins).innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id)).innerJoin(users, eq(taskCheckins.checkedBy, users.id)).where(eq(routineTasks.familyId, familyId)).groupBy(users.id, users.name, users.email, users.avatarUrl).orderBy(desc(sql`count(${taskCheckins.id})`));
+}
+async function getChildTimelineEvents(childId) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    taskId: routineTasks.id,
+    title: routineTasks.title,
+    category: routineTasks.category,
+    completedBy: taskCheckins.checkedBy,
+    completedByName: users.name,
+    checkedInAt: taskCheckins.checkedAt,
+    notes: taskCheckins.note
+  }).from(taskCheckins).innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id)).leftJoin(users, eq(taskCheckins.checkedBy, users.id)).where(eq(routineTasks.childId, childId)).orderBy(desc(taskCheckins.checkedAt)).limit(50);
+}
+async function getFamilyInfoWithCounts(familyId) {
+  const db = await getDb();
+  if (!db) return null;
+  const family = await db.select().from(families).where(eq(families.id, familyId)).limit(1);
+  if (!family[0]) return null;
+  const [memberCount, childrenCount] = await Promise.all([
+    db.select({ count: sql`count(*)` }).from(familyMembers).where(eq(familyMembers.familyId, familyId)),
+    db.select({ count: sql`count(*)` }).from(children).where(eq(children.familyId, familyId))
+  ]);
+  return {
+    ...family[0],
+    memberCount: Number(memberCount[0]?.count || 0),
+    childrenCount: Number(childrenCount[0]?.count || 0)
+  };
+}
 async function getUpcomingTimelineByFamily(familyId, from, to) {
   const db = await getDb();
   if (!db) return [];
@@ -1335,6 +1489,111 @@ async function getMyConnections(userId) {
   );
   return rows;
 }
+async function getSecondDegreeConnections(userId) {
+  const db = await getDb();
+  if (!db) return [];
+  const accepted = await db.select({
+    requesterId: connections.requesterId,
+    receiverId: connections.receiverId
+  }).from(connections).where(eq(connections.status, "accepted"));
+  const directIds = /* @__PURE__ */ new Set();
+  for (const connection of accepted) {
+    if (connection.requesterId === userId) directIds.add(connection.receiverId);
+    if (connection.receiverId === userId) directIds.add(connection.requesterId);
+  }
+  if (directIds.size === 0) return [];
+  const candidateCounts = /* @__PURE__ */ new Map();
+  for (const connection of accepted) {
+    const a = connection.requesterId;
+    const b = connection.receiverId;
+    if (directIds.has(a) && b !== userId && !directIds.has(b)) {
+      if (!candidateCounts.has(b)) candidateCounts.set(b, /* @__PURE__ */ new Set());
+      candidateCounts.get(b)?.add(a);
+    }
+    if (directIds.has(b) && a !== userId && !directIds.has(a)) {
+      if (!candidateCounts.has(a)) candidateCounts.set(a, /* @__PURE__ */ new Set());
+      candidateCounts.get(a)?.add(b);
+    }
+  }
+  const candidateIds = Array.from(candidateCounts.keys());
+  if (candidateIds.length === 0) return [];
+  const candidateUsers = await db.select({
+    userId: users.id,
+    userName: users.name,
+    userEmail: users.email,
+    userBio: users.bio,
+    avatarUrl: users.avatarUrl
+  }).from(users).where(inArray(users.id, candidateIds));
+  return candidateUsers.map((candidate) => ({
+    ...candidate,
+    mutualFriendCount: candidateCounts.get(candidate.userId)?.size || 0
+  })).sort((a, b) => b.mutualFriendCount - a.mutualFriendCount);
+}
+async function getRecommendationChainForTarget(targetUserId) {
+  const db = await getDb();
+  if (!db) return [];
+  const recommendedUser = alias(users, "recommended_user");
+  const recommenderUser = alias(users, "recommender_user");
+  return db.select({
+    recommendationId: recommendations.id,
+    userId: recommendations.userId,
+    userName: recommendedUser.name,
+    userEmail: recommendedUser.email,
+    recommenderId: recommendations.recommenderId,
+    recommenderName: recommenderUser.name,
+    context: recommendations.context,
+    createdAt: recommendations.createdAt
+  }).from(recommendations).leftJoin(recommendedUser, eq(recommendations.userId, recommendedUser.id)).leftJoin(recommenderUser, eq(recommendations.recommenderId, recommenderUser.id)).where(eq(recommendations.targetUserId, targetUserId)).orderBy(desc(recommendations.createdAt));
+}
+async function getUserInfluenceScore(userId) {
+  const db = await getDb();
+  if (!db) {
+    return { directConnections: 0, recommendations: 0, helpProvided: 0, influenceScore: 0 };
+  }
+  const [directRows, recommendationRows, helpRows] = await Promise.all([
+    db.select({ count: sql`count(*)` }).from(connections).where(
+      and(
+        or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+        eq(connections.status, "accepted")
+      )
+    ),
+    db.select({ count: sql`count(*)` }).from(recommendations).where(eq(recommendations.recommenderId, userId)),
+    db.select({ count: sql`count(*)` }).from(skillMatches).where(and(eq(skillMatches.providerId, userId), eq(skillMatches.status, "completed")))
+  ]);
+  const directConnections = Number(directRows[0]?.count || 0);
+  const recommendationCount = Number(recommendationRows[0]?.count || 0);
+  const helpProvided = Number(helpRows[0]?.count || 0);
+  return {
+    directConnections,
+    recommendations: recommendationCount,
+    helpProvided,
+    influenceScore: directConnections * 10 + recommendationCount * 20 + helpProvided * 15
+  };
+}
+async function getUserNetworkStats(userId) {
+  const db = await getDb();
+  if (!db) return { directConnections: 0, pendingRequests: 0, recommendations: 0 };
+  const [directRows, pendingRows, recommendationRows] = await Promise.all([
+    db.select({ count: sql`count(*)` }).from(connections).where(
+      and(
+        or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+        eq(connections.status, "accepted")
+      )
+    ),
+    db.select({ count: sql`count(*)` }).from(connections).where(
+      and(
+        or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+        eq(connections.status, "pending")
+      )
+    ),
+    db.select({ count: sql`count(*)` }).from(recommendations).where(eq(recommendations.recommenderId, userId))
+  ]);
+  return {
+    directConnections: Number(directRows[0]?.count || 0),
+    pendingRequests: Number(pendingRows[0]?.count || 0),
+    recommendations: Number(recommendationRows[0]?.count || 0)
+  };
+}
 async function getPendingRequests(userId) {
   const db = await getDb();
   if (!db) return [];
@@ -1352,6 +1611,169 @@ async function getUserByUserId(userId) {
   if (!db) return void 0;
   const result = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   return result[0];
+}
+function positiveModulo(value, divisor) {
+  return (value % divisor + divisor) % divisor;
+}
+function calculateSunSign(month, day) {
+  const signs = [
+    { name: "\u6469\u7FAF\u5EA7", start: [12, 22], end: [1, 19] },
+    { name: "\u6C34\u74F6\u5EA7", start: [1, 20], end: [2, 18] },
+    { name: "\u53CC\u9C7C\u5EA7", start: [2, 19], end: [3, 20] },
+    { name: "\u767D\u7F8A\u5EA7", start: [3, 21], end: [4, 19] },
+    { name: "\u91D1\u725B\u5EA7", start: [4, 20], end: [5, 20] },
+    { name: "\u53CC\u5B50\u5EA7", start: [5, 21], end: [6, 20] },
+    { name: "\u5DE8\u87F9\u5EA7", start: [6, 21], end: [7, 22] },
+    { name: "\u72EE\u5B50\u5EA7", start: [7, 23], end: [8, 22] },
+    { name: "\u5904\u5973\u5EA7", start: [8, 23], end: [9, 22] },
+    { name: "\u5929\u79E4\u5EA7", start: [9, 23], end: [10, 22] },
+    { name: "\u5929\u874E\u5EA7", start: [10, 23], end: [11, 21] },
+    { name: "\u5C04\u624B\u5EA7", start: [11, 22], end: [12, 21] }
+  ];
+  for (const sign of signs) {
+    const [startMonth, startDay] = sign.start;
+    const [endMonth, endDay] = sign.end;
+    if (startMonth === endMonth) {
+      if (month === startMonth && day >= startDay && day <= endDay) return sign.name;
+    } else if (month === startMonth && day >= startDay || month === endMonth && day <= endDay) {
+      return sign.name;
+    }
+  }
+  return "\u672A\u77E5";
+}
+function calculateZodiac(year) {
+  const animals = ["\u9F20", "\u725B", "\u864E", "\u5154", "\u9F99", "\u86C7", "\u9A6C", "\u7F8A", "\u7334", "\u9E21", "\u72D7", "\u732A"];
+  return animals[positiveModulo(year - 1900, animals.length)];
+}
+function calculateBaziParts(year) {
+  const stems = ["\u7532", "\u4E59", "\u4E19", "\u4E01", "\u620A", "\u5DF1", "\u5E9A", "\u8F9B", "\u58EC", "\u7678"];
+  const branches = ["\u5B50", "\u4E11", "\u5BC5", "\u536F", "\u8FB0", "\u5DF3", "\u5348", "\u672A", "\u7533", "\u9149", "\u620C", "\u4EA5"];
+  return {
+    heavenlyStem: stems[positiveModulo(year - 1900, stems.length)],
+    earthlyBranch: branches[positiveModulo(year - 1900, branches.length)]
+  };
+}
+function signCompatibility(sign1, sign2) {
+  if (!sign1 || !sign2) return 50;
+  const map = {
+    \u767D\u7F8A\u5EA7: { \u767D\u7F8A\u5EA7: 100, \u72EE\u5B50\u5EA7: 95, \u5C04\u624B\u5EA7: 90, \u91D1\u725B\u5EA7: 40, \u5DE8\u87F9\u5EA7: 35, \u5929\u79E4\u5EA7: 50 },
+    \u91D1\u725B\u5EA7: { \u91D1\u725B\u5EA7: 100, \u5904\u5973\u5EA7: 95, \u6469\u7FAF\u5EA7: 90, \u767D\u7F8A\u5EA7: 40, \u72EE\u5B50\u5EA7: 35, \u6C34\u74F6\u5EA7: 45 },
+    \u53CC\u5B50\u5EA7: { \u53CC\u5B50\u5EA7: 100, \u5929\u79E4\u5EA7: 95, \u6C34\u74F6\u5EA7: 90, \u5DE8\u87F9\u5EA7: 40, \u5904\u5973\u5EA7: 35, \u53CC\u9C7C\u5EA7: 45 },
+    \u5DE8\u87F9\u5EA7: { \u5DE8\u87F9\u5EA7: 100, \u5929\u874E\u5EA7: 95, \u53CC\u9C7C\u5EA7: 90, \u767D\u7F8A\u5EA7: 35, \u5929\u79E4\u5EA7: 40, \u6469\u7FAF\u5EA7: 50 },
+    \u72EE\u5B50\u5EA7: { \u72EE\u5B50\u5EA7: 100, \u5C04\u624B\u5EA7: 95, \u767D\u7F8A\u5EA7: 90, \u91D1\u725B\u5EA7: 35, \u6C34\u74F6\u5EA7: 40, \u5929\u874E\u5EA7: 45 },
+    \u5904\u5973\u5EA7: { \u5904\u5973\u5EA7: 100, \u6469\u7FAF\u5EA7: 95, \u91D1\u725B\u5EA7: 90, \u53CC\u5B50\u5EA7: 35, \u53CC\u9C7C\u5EA7: 40, \u5C04\u624B\u5EA7: 45 },
+    \u5929\u79E4\u5EA7: { \u5929\u79E4\u5EA7: 100, \u6C34\u74F6\u5EA7: 95, \u53CC\u5B50\u5EA7: 90, \u5DE8\u87F9\u5EA7: 40, \u6469\u7FAF\u5EA7: 35, \u767D\u7F8A\u5EA7: 50 },
+    \u5929\u874E\u5EA7: { \u5929\u874E\u5EA7: 100, \u53CC\u9C7C\u5EA7: 95, \u5DE8\u87F9\u5EA7: 90, \u72EE\u5B50\u5EA7: 40, \u91D1\u725B\u5EA7: 35, \u6C34\u74F6\u5EA7: 45 },
+    \u5C04\u624B\u5EA7: { \u5C04\u624B\u5EA7: 100, \u767D\u7F8A\u5EA7: 95, \u72EE\u5B50\u5EA7: 90, \u5904\u5973\u5EA7: 40, \u53CC\u9C7C\u5EA7: 35, \u91D1\u725B\u5EA7: 50 },
+    \u6469\u7FAF\u5EA7: { \u6469\u7FAF\u5EA7: 100, \u91D1\u725B\u5EA7: 95, \u5904\u5973\u5EA7: 90, \u5929\u79E4\u5EA7: 40, \u5DE8\u87F9\u5EA7: 35, \u53CC\u5B50\u5EA7: 45 },
+    \u6C34\u74F6\u5EA7: { \u6C34\u74F6\u5EA7: 100, \u53CC\u5B50\u5EA7: 95, \u5929\u79E4\u5EA7: 90, \u72EE\u5B50\u5EA7: 40, \u5929\u874E\u5EA7: 35, \u5DE8\u87F9\u5EA7: 50 },
+    \u53CC\u9C7C\u5EA7: { \u53CC\u9C7C\u5EA7: 100, \u5DE8\u87F9\u5EA7: 95, \u5929\u874E\u5EA7: 90, \u53CC\u5B50\u5EA7: 40, \u5C04\u624B\u5EA7: 35, \u5904\u5973\u5EA7: 45 }
+  };
+  return map[sign1]?.[sign2] || 60;
+}
+function harmonyScore(value1, value2) {
+  if (!value1 || !value2) return 50;
+  const harmonies = {
+    \u9F20: ["\u9F99", "\u7334"],
+    \u725B: ["\u86C7", "\u9E21"],
+    \u864E: ["\u9A6C", "\u72D7"],
+    \u5154: ["\u7F8A", "\u732A"],
+    \u9F99: ["\u9F20", "\u7334"],
+    \u86C7: ["\u725B", "\u9E21"],
+    \u9A6C: ["\u864E", "\u72D7"],
+    \u7F8A: ["\u5154", "\u732A"],
+    \u7334: ["\u9F20", "\u9F99"],
+    \u9E21: ["\u725B", "\u86C7"],
+    \u72D7: ["\u864E", "\u9A6C"],
+    \u732A: ["\u5154", "\u7F8A"],
+    \u5B50: ["\u8FB0", "\u7533"],
+    \u4E11: ["\u5DF3", "\u9149"],
+    \u5BC5: ["\u5348", "\u620C"],
+    \u536F: ["\u672A", "\u4EA5"],
+    \u8FB0: ["\u5B50", "\u7533"],
+    \u5DF3: ["\u4E11", "\u9149"],
+    \u5348: ["\u5BC5", "\u620C"],
+    \u672A: ["\u536F", "\u4EA5"],
+    \u7533: ["\u5B50", "\u8FB0"],
+    \u9149: ["\u4E11", "\u5DF3"],
+    \u620C: ["\u5BC5", "\u5348"],
+    \u4EA5: ["\u536F", "\u672A"]
+  };
+  if (value1 === value2) return 100;
+  return harmonies[value1]?.includes(value2) ? 88 : 50;
+}
+function matchingDescription(score) {
+  if (score >= 85) return "\u5929\u751F\u4E00\u5BF9\uFF01\u4F60\u4EEC\u7684\u661F\u76D8\u663E\u793A\u51FA\u6781\u9AD8\u7684\u517C\u5BB9\u6027\uFF0C\u6027\u683C\u548C\u4EF7\u503C\u89C2\u90FD\u6709\u5F88\u5F3A\u7684\u4E92\u8865\u611F\u3002";
+  if (score >= 70) return "\u5F88\u6709\u7F18\u5206\uFF01\u4F60\u4EEC\u5728\u591A\u4E2A\u65B9\u9762\u90FD\u6709\u5171\u9E23\uFF0C\u5DEE\u5F02\u4E5F\u80FD\u6210\u4E3A\u5F7C\u6B64\u5438\u5F15\u7684\u90E8\u5206\u3002";
+  if (score >= 50) return "\u6709\u4E00\u5B9A\u57FA\u7840\u3002\u4F60\u4EEC\u9700\u8981\u66F4\u591A\u7406\u89E3\u548C\u5305\u5BB9\uFF0C\u5173\u7CFB\u4F1A\u5728\u6C9F\u901A\u4E2D\u9010\u6B65\u7A33\u5B9A\u3002";
+  return "\u9700\u8981\u52AA\u529B\u3002\u4F60\u4EEC\u7684\u8282\u594F\u548C\u8868\u8FBE\u65B9\u5F0F\u5DEE\u5F02\u8F83\u5927\uFF0C\u9002\u5408\u5148\u4ECE\u8F7B\u677E\u76F8\u5904\u5F00\u59CB\u3002";
+}
+async function getUserAstrologyProfile(userId) {
+  const user = await getUserById(userId);
+  if (!user?.birthDate) return null;
+  const birthDate = user.birthDate;
+  const { heavenlyStem, earthlyBranch } = calculateBaziParts(birthDate.getFullYear());
+  return {
+    userId,
+    birthDate,
+    sunSign: calculateSunSign(birthDate.getMonth() + 1, birthDate.getDate()),
+    chineseZodiac: calculateZodiac(birthDate.getFullYear()),
+    heavenlyStem,
+    earthlyBranch
+  };
+}
+async function calculateCompatibility(userId1, userId2) {
+  const db = await getDb();
+  if (!db) return null;
+  const [profile1, profile2, userRows] = await Promise.all([
+    getUserAstrologyProfile(userId1),
+    getUserAstrologyProfile(userId2),
+    db.select({ id: users.id, name: users.name }).from(users).where(inArray(users.id, [userId1, userId2]))
+  ]);
+  if (!profile1 || !profile2) return null;
+  const sunSignCompatibility = signCompatibility(profile1.sunSign, profile2.sunSign);
+  const chineseZodiacCompatibility = harmonyScore(profile1.chineseZodiac, profile2.chineseZodiac);
+  const baziHarmony = harmonyScore(profile1.earthlyBranch, profile2.earthlyBranch);
+  const compatibilityScore = Math.round(
+    sunSignCompatibility * 0.3 + chineseZodiacCompatibility * 0.4 + baziHarmony * 0.3
+  );
+  const nameById = new Map(userRows.map((user) => [user.id, user.name]));
+  return {
+    matchId: `match_${userId1}_${userId2}_${Date.now()}`,
+    userId1,
+    userId2,
+    userName1: nameById.get(userId1) ?? null,
+    userName2: nameById.get(userId2) ?? null,
+    compatibilityScore,
+    sunSignCompatibility,
+    moonSignCompatibility: 0,
+    chineseZodiacCompatibility,
+    baziHarmony,
+    description: matchingDescription(compatibilityScore),
+    createdAt: /* @__PURE__ */ new Date()
+  };
+}
+async function getMatchingRecommendations(userId, limit = 10) {
+  const db = await getDb();
+  if (!db) return [];
+  const currentProfile = await getUserAstrologyProfile(userId);
+  if (!currentProfile) return [];
+  const candidates = await db.select({ id: users.id }).from(users).where(and(sql`${users.id} != ${userId}`, sql`${users.birthDate} is not null`)).limit(limit * 3);
+  const matches = [];
+  for (const candidate of candidates) {
+    const match = await calculateCompatibility(userId, candidate.id);
+    if (match) matches.push(match);
+  }
+  return matches.sort((a, b) => b.compatibilityScore - a.compatibilityScore).slice(0, limit);
+}
+async function saveMatchingRecord(userId1, userId2, compatibilityScore, details) {
+  return {
+    userId1,
+    userId2,
+    compatibilityScore,
+    details,
+    createdAt: /* @__PURE__ */ new Date()
+  };
 }
 async function checkExistingConnection(requesterId, receiverId) {
   const db = await getDb();
@@ -1850,6 +2272,21 @@ async function getMatchesByRequest(requestId) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(skillMatches).where(eq(skillMatches.requestId, requestId));
+}
+async function getMatchesForHelpRequest(requestId) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    matchId: skillMatches.id,
+    providerId: skillMatches.providerId,
+    providerName: users.name,
+    providerEmail: users.email,
+    skillId: skillMatches.skillId,
+    skillName: skills.name,
+    proposedPrice: skills.priceMin,
+    status: skillMatches.status,
+    createdAt: skillMatches.createdAt
+  }).from(skillMatches).innerJoin(users, eq(skillMatches.providerId, users.id)).innerJoin(skills, eq(skillMatches.skillId, skills.id)).where(eq(skillMatches.requestId, requestId)).orderBy(desc(skillMatches.createdAt));
 }
 async function getSkillMatchById(matchId) {
   const db = await getDb();
@@ -2986,6 +3423,71 @@ var appRouter = router({
       await assertFamilyMember(input.familyId, ctx.user.id);
       return getFamilyMembers(input.familyId);
     }),
+    membersWithDetails: protectedProcedure.input(z2.object({ familyId: z2.number() })).query(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      return getFamilyMembersWithDetails(input.familyId);
+    }),
+    tasksByAssignee: protectedProcedure.input(z2.object({ familyId: z2.number() })).query(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      return getFamilyTasksByAssignee(input.familyId);
+    }),
+    taskStats: protectedProcedure.input(z2.object({ familyId: z2.number() })).query(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      return getTaskCompletionStats(input.familyId);
+    }),
+    checkInTask: protectedProcedure.input(z2.object({
+      taskId: z2.number(),
+      completedBy: z2.number().optional(),
+      notes: z2.string().optional()
+    })).mutation(async ({ ctx, input }) => {
+      const completedBy = input.completedBy ?? ctx.user.id;
+      const checkinId = await checkInFamilyTask(input.taskId, completedBy, input.notes);
+      return { success: true, checkinId };
+    }),
+    leaderboard: protectedProcedure.input(z2.object({ familyId: z2.number() })).query(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      return getFamilyContributionLeaderboard(input.familyId);
+    }),
+    childTimeline: protectedProcedure.input(z2.object({ childId: z2.number() })).query(async ({ ctx, input }) => {
+      const child = await getChildById(input.childId);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5B69\u5B50\u4E0D\u5B58\u5728" });
+      await assertFamilyMember(child.familyId, ctx.user.id);
+      return getChildTimelineEvents(input.childId);
+    }),
+    childGrowth: protectedProcedure.input(z2.object({ childId: z2.number() })).query(async ({ ctx, input }) => {
+      const child = await getChildById(input.childId);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5B69\u5B50\u4E0D\u5B58\u5728" });
+      await assertFamilyMember(child.familyId, ctx.user.id);
+      return getChildGrowthRecord(input.childId);
+    }),
+    updateChild: protectedProcedure.input(z2.object({
+      childId: z2.number(),
+      nickname: z2.string().min(1).max(50).optional(),
+      fullName: z2.string().max(100).optional().nullable(),
+      gender: z2.enum(["girl", "boy", "unknown"]).optional()
+    })).mutation(async ({ ctx, input }) => {
+      const child = await getChildById(input.childId);
+      if (!child) throw new TRPCError3({ code: "NOT_FOUND", message: "\u5B69\u5B50\u4E0D\u5B58\u5728" });
+      await assertFamilyCollaboratorOrAdmin(child.familyId, ctx.user.id);
+      const { childId, ...data } = input;
+      await updateChild(childId, data);
+      return { success: true };
+    }),
+    addMember: protectedProcedure.input(z2.object({
+      familyId: z2.number(),
+      userId: z2.number(),
+      role: z2.enum(["admin", "collaborator", "observer"]).default("observer")
+    })).mutation(async ({ ctx, input }) => {
+      await assertFamilyAdmin(input.familyId, ctx.user.id);
+      const existing = await getMemberRole(input.familyId, input.userId);
+      if (existing) throw new TRPCError3({ code: "CONFLICT", message: "\u8BE5\u7528\u6237\u5DF2\u662F\u5BB6\u5EAD\u6210\u5458" });
+      await addFamilyMember({ familyId: input.familyId, userId: input.userId, role: input.role });
+      return { success: true };
+    }),
+    info: protectedProcedure.input(z2.object({ familyId: z2.number() })).query(async ({ ctx, input }) => {
+      await assertFamilyMember(input.familyId, ctx.user.id);
+      return getFamilyInfoWithCounts(input.familyId);
+    }),
     updateMemberRole: protectedProcedure.input(z2.object({ familyId: z2.number(), userId: z2.number(), role: z2.enum(["admin", "collaborator", "observer"]) })).mutation(async ({ ctx, input }) => {
       await assertFamilyAdmin(input.familyId, ctx.user.id);
       if (input.role !== "admin") {
@@ -3827,6 +4329,58 @@ var appRouter = router({
     search: protectedProcedure.input(z2.object({ query: z2.string().min(1) })).query(async ({ ctx, input }) => {
       return searchUsersByName(input.query, ctx.user.id);
     }),
+    secondDegree: protectedProcedure.query(async ({ ctx }) => {
+      return getSecondDegreeConnections(ctx.user.id);
+    }),
+    recommendationChain: protectedProcedure.input(z2.object({ targetUserId: z2.number() })).query(async ({ input }) => {
+      return getRecommendationChainForTarget(input.targetUserId);
+    }),
+    createRecommendation: protectedProcedure.input(z2.object({
+      userId: z2.number(),
+      targetUserId: z2.number(),
+      context: z2.string().max(255).optional()
+    })).mutation(async ({ ctx, input }) => {
+      const id = await createRecommendation({
+        userId: input.userId,
+        recommenderId: ctx.user.id,
+        targetUserId: input.targetUserId,
+        context: input.context
+      });
+      return { id };
+    }),
+    influenceScore: protectedProcedure.query(async ({ ctx }) => {
+      return getUserInfluenceScore(ctx.user.id);
+    }),
+    networkStats: protectedProcedure.query(async ({ ctx }) => {
+      return getUserNetworkStats(ctx.user.id);
+    }),
+    helpRequests: router({
+      create: protectedProcedure.input(z2.object({
+        title: z2.string().min(1).max(255),
+        description: z2.string().optional(),
+        category: z2.string().optional(),
+        targetSkills: z2.array(z2.string()).optional()
+      })).mutation(async ({ ctx, input }) => {
+        const skillTags = input.targetSkills?.length ? input.targetSkills : input.category ? [input.category] : [];
+        const id = await createHelpRequest({
+          userId: ctx.user.id,
+          title: input.title,
+          description: input.description,
+          skillTags: JSON.stringify(skillTags),
+          status: "open"
+        });
+        return { id };
+      }),
+      open: publicProcedure.input(z2.object({ limit: z2.number().min(1).max(50).default(20) })).query(async ({ input }) => {
+        return getOpenHelpRequests(input.limit, 0);
+      }),
+      myRequests: protectedProcedure.query(async ({ ctx }) => {
+        return getHelpRequestsByUser(ctx.user.id);
+      }),
+      matches: protectedProcedure.input(z2.object({ helpRequestId: z2.number() })).query(async ({ input }) => {
+        return getMatchesForHelpRequest(input.helpRequestId);
+      })
+    }),
     // Get connection status and mutual friends between me and another user
     statusWith: protectedProcedure.input(z2.object({ targetUserId: z2.number() })).query(async ({ ctx, input }) => {
       const conn = await getConnectionBetween(ctx.user.id, input.targetUserId);
@@ -3930,6 +4484,31 @@ var appRouter = router({
   milestones: router({
     all: publicProcedure.query(() => getAllMilestoneTemplates()),
     byAge: publicProcedure.input(z2.object({ ageMonths: z2.number() })).query(({ input }) => getMilestonesByAge(input.ageMonths))
+  }),
+  // ─── Astrology / Cyber Matchmaker 赛博月老 ─────────────────────────
+  astrology: router({
+    profile: protectedProcedure.input(z2.object({ userId: z2.number().optional() })).query(async ({ ctx, input }) => {
+      return getUserAstrologyProfile(input.userId ?? ctx.user.id);
+    }),
+    compatibility: protectedProcedure.input(z2.object({ userId1: z2.number(), userId2: z2.number() })).query(async ({ input }) => {
+      return calculateCompatibility(input.userId1, input.userId2);
+    }),
+    recommendations: protectedProcedure.input(z2.object({ limit: z2.number().min(1).max(30).default(10) })).query(async ({ ctx, input }) => {
+      return getMatchingRecommendations(ctx.user.id, input.limit);
+    }),
+    saveMatch: protectedProcedure.input(z2.object({
+      userId1: z2.number(),
+      userId2: z2.number(),
+      compatibilityScore: z2.number().min(0).max(100),
+      details: z2.record(z2.string(), z2.unknown()).default({})
+    })).mutation(async ({ input }) => {
+      return saveMatchingRecord(
+        input.userId1,
+        input.userId2,
+        input.compatibilityScore,
+        input.details
+      );
+    })
   }),
   // ═══════════════════════════════════════════════════════════════════════
   // v4.0 Pinple — 推荐链 / 技能市场 / 举报 / 屏蔽 / 信用体系

@@ -80,6 +80,7 @@ type Child = {
   id: number; familyId: number; nickname: string; fullName?: string;
   gender?: string; birthDate?: string; isMultiple?: boolean;
   childOneName?: string; childTwoName?: string;
+  childOneGender?: string; childTwoGender?: string;
   pregnancyRefDate?: string; pregnancyWeeksAtRef?: number;
   embryoTransferDate?: string; embryoDay?: number;
   ageInfo?: { years: number; months: number; totalMonths: number };

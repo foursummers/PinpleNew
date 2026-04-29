@@ -13,16 +13,16 @@
     <path d="M54 164c-30 5-46 28-40 54 6 28 40 36 69 18" fill="url(#body)"/>
     <path d="M186 164c30 5 46 28 40 54-6 28-40 36-69 18" fill="url(#body)"/>
   </g>
-  <text x="112" y="168" fill="#FFD76A" font-family="Arial, sans-serif" font-size="34" font-weight="700">pinple ��</text>
-  <text x="112" y="262" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="72" font-weight="800">ޥ`́��</text>
-  <text x="112" y="326" fill="#A8A29A" font-family="Arial, sans-serif" font-size="30">>� � �� � �	o�</text>
+  <text x="112" y="168" fill="#FFD76A" font-family="Arial, sans-serif" font-size="34" font-weight="700">pinple 拼朋友</text>
+  <text x="112" y="262" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="72" font-weight="800">连接你重要的人</text>
+  <text x="112" y="326" fill="#A8A29A" font-family="Arial, sans-serif" font-size="30">社交 · 家庭 · 人脉软件</text>
   <g transform="translate(112 402)">
     <rect width="168" height="54" rx="27" fill="url(#pill)"/>
-    <text x="84" y="35" text-anchor="middle" fill="#111111" font-family="Arial, sans-serif" font-size="22" font-weight="700">�	</text>
+    <text x="84" y="35" text-anchor="middle" fill="#111111" font-family="Arial, sans-serif" font-size="22" font-weight="700">人脉</text>
     <rect x="188" width="168" height="54" rx="27" fill="rgba(255,255,255,0.05)" stroke="rgba(255,215,106,0.22)"/>
-    <text x="272" y="35" text-anchor="middle" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="22" font-weight="700">:</text>
+    <text x="272" y="35" text-anchor="middle" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="22" font-weight="700">机会</text>
     <rect x="376" width="168" height="54" rx="27" fill="rgba(255,255,255,0.05)" stroke="rgba(255,215,106,0.22)"/>
-    <text x="460" y="35" text-anchor="middle" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="22" font-weight="700">��</text>
+    <text x="460" y="35" text-anchor="middle" fill="#F7F4EA" font-family="Arial, sans-serif" font-size="22" font-weight="700">家庭</text>
   </g>
   <defs>
     <linearGradient id="body" x1="30" y1="18" x2="210" y2="230" gradientUnits="userSpaceOnUse">

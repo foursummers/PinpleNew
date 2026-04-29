@@ -54,7 +54,8 @@ import {
   PasswordResetToken,
 } from "../drizzle/schema";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+type DbClient = ReturnType<typeof drizzle>;
+let _db: DbClient | null = null;
 let _dbCreatedAt = 0;
 let _schemaReadyPromise: Promise<void> | null = null;
 const DB_MAX_AGE_MS = 5 * 60 * 1000; // Recreate connection every 5 minutes to prevent stale connections
@@ -127,7 +128,7 @@ export async function getDb() {
     try {
       const cfg = buildDbConfig(process.env.DATABASE_URL);
       const pool = mysql.createPool(cfg);
-      _db = drizzle(pool);
+      _db = drizzle(pool as any) as DbClient;
       _dbCreatedAt = now;
       console.log(
         `[Database] pool created — host=${(cfg as any).host} db=${(cfg as any).database} ssl=${!!(cfg as any).ssl}`,
@@ -167,7 +168,7 @@ export async function getDb() {
  * so fresh DBs get fully provisioned; errors on already-existing columns are
  * swallowed so partially-migrated DBs get topped up.
  */
-async function ensureSchema(_db: NonNullable<typeof _db>) {
+async function ensureSchema(dbRef: DbClient) {
   if (!process.env.DATABASE_URL) return;
 
   const startedAt = Date.now();
@@ -528,6 +529,194 @@ export async function updateChild(id: number, data: Partial<InsertChild>) {
   await db.update(children).set(data).where(eq(children.id, id));
 }
 
+// ─── Extended Family API ─────────────────────────────────────────────────────
+export async function getFamilyMembersWithDetails(familyId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      memberId: familyMembers.id,
+      userId: familyMembers.userId,
+      role: familyMembers.role,
+      nickname: familyMembers.nickname,
+      name: users.name,
+      email: users.email,
+      bio: users.bio,
+      location: users.location,
+      avatarUrl: users.avatarUrl,
+      joinedAt: familyMembers.joinedAt,
+      birthDate: familyMembers.birthDate,
+      anniversaryDate: familyMembers.anniversaryDate,
+    })
+    .from(familyMembers)
+    .leftJoin(users, eq(familyMembers.userId, users.id))
+    .where(eq(familyMembers.familyId, familyId))
+    .orderBy(desc(familyMembers.joinedAt));
+}
+
+export async function getChildGrowthRecord(childId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const child = await db.select().from(children).where(eq(children.id, childId)).limit(1);
+  if (!child[0]) return null;
+  const tasks = await db
+    .select({
+      taskId: routineTasks.id,
+      title: routineTasks.title,
+      category: routineTasks.category,
+      assignedTo: routineTasks.assignedTo,
+      isActive: routineTasks.isActive,
+      todayCheckins: sql<number>`count(${taskCheckins.id})`,
+    })
+    .from(routineTasks)
+    .leftJoin(
+      taskCheckins,
+      and(
+        eq(taskCheckins.taskId, routineTasks.id),
+        gte(taskCheckins.checkedAt, new Date(new Date().toISOString().slice(0, 10) + "T00:00:00.000Z")),
+      ),
+    )
+    .where(eq(routineTasks.childId, childId))
+    .groupBy(
+      routineTasks.id,
+      routineTasks.title,
+      routineTasks.category,
+      routineTasks.assignedTo,
+      routineTasks.isActive,
+    )
+    .orderBy(desc(routineTasks.createdAt));
+  return { ...child[0], tasks };
+}
+
+export async function getFamilyTasksByAssignee(familyId: number) {
+  const db = await getDb();
+  if (!db) return {};
+  const rows = await db
+    .select({
+      taskId: routineTasks.id,
+      title: routineTasks.title,
+      description: routineTasks.description,
+      category: routineTasks.category,
+      assignedTo: routineTasks.assignedTo,
+      assigneeName: users.name,
+      childId: routineTasks.childId,
+      childName: children.nickname,
+      isActive: routineTasks.isActive,
+      createdAt: routineTasks.createdAt,
+    })
+    .from(routineTasks)
+    .leftJoin(users, eq(routineTasks.assignedTo, users.id))
+    .leftJoin(children, eq(routineTasks.childId, children.id))
+    .where(eq(routineTasks.familyId, familyId))
+    .orderBy(desc(routineTasks.createdAt));
+  return rows.reduce(
+    (acc, task) => {
+      const assigneeName = task.assigneeName || "未分配";
+      if (!acc[assigneeName]) acc[assigneeName] = [];
+      acc[assigneeName].push(task);
+      return acc;
+    },
+    {} as Record<string, typeof rows>,
+  );
+}
+
+export async function getTaskCompletionStats(familyId: number) {
+  const db = await getDb();
+  if (!db) return { totalTasks: 0, completed: 0, completionRate: 0 };
+  const [totalRows, completedRows] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(routineTasks)
+      .where(eq(routineTasks.familyId, familyId)),
+    db
+      .select({ count: sql<number>`count(distinct ${taskCheckins.taskId})` })
+      .from(taskCheckins)
+      .innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id))
+      .where(eq(routineTasks.familyId, familyId)),
+  ]);
+  const totalTasks = Number(totalRows[0]?.count || 0);
+  const completed = Number(completedRows[0]?.count || 0);
+  return {
+    totalTasks,
+    completed,
+    completionRate: totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : 0,
+  };
+}
+
+export async function checkInFamilyTask(
+  taskId: number,
+  completedBy: number,
+  notes?: string,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const task = await db.select().from(routineTasks).where(eq(routineTasks.id, taskId)).limit(1);
+  if (!task[0]) throw new Error("Task not found");
+  const result = await db.insert(taskCheckins).values({
+    taskId,
+    childId: task[0].childId,
+    checkedBy: completedBy,
+    note: notes,
+  });
+  return (result[0] as any).insertId as number;
+}
+
+export async function getFamilyContributionLeaderboard(familyId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      userId: users.id,
+      name: users.name,
+      email: users.email,
+      avatarUrl: users.avatarUrl,
+      tasksCompleted: sql<number>`count(${taskCheckins.id})`,
+    })
+    .from(taskCheckins)
+    .innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id))
+    .innerJoin(users, eq(taskCheckins.checkedBy, users.id))
+    .where(eq(routineTasks.familyId, familyId))
+    .groupBy(users.id, users.name, users.email, users.avatarUrl)
+    .orderBy(desc(sql<number>`count(${taskCheckins.id})`));
+}
+
+export async function getChildTimelineEvents(childId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      taskId: routineTasks.id,
+      title: routineTasks.title,
+      category: routineTasks.category,
+      completedBy: taskCheckins.checkedBy,
+      completedByName: users.name,
+      checkedInAt: taskCheckins.checkedAt,
+      notes: taskCheckins.note,
+    })
+    .from(taskCheckins)
+    .innerJoin(routineTasks, eq(taskCheckins.taskId, routineTasks.id))
+    .leftJoin(users, eq(taskCheckins.checkedBy, users.id))
+    .where(eq(routineTasks.childId, childId))
+    .orderBy(desc(taskCheckins.checkedAt))
+    .limit(50);
+}
+
+export async function getFamilyInfoWithCounts(familyId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const family = await db.select().from(families).where(eq(families.id, familyId)).limit(1);
+  if (!family[0]) return null;
+  const [memberCount, childrenCount] = await Promise.all([
+    db.select({ count: sql<number>`count(*)` }).from(familyMembers).where(eq(familyMembers.familyId, familyId)),
+    db.select({ count: sql<number>`count(*)` }).from(children).where(eq(children.familyId, familyId)),
+  ]);
+  return {
+    ...family[0],
+    memberCount: Number(memberCount[0]?.count || 0),
+    childrenCount: Number(childrenCount[0]?.count || 0),
+  };
+}
+
 /**
  * Multi-family calendar helper — returns upcoming timeline milestone/pregnancy
  * events for a given family between [from, to]. Used by calendar aggregation.
@@ -849,6 +1038,151 @@ export async function getMyConnections(userId: number) {
   return rows;
 }
 
+export async function getSecondDegreeConnections(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const accepted = await db
+    .select({
+      requesterId: connections.requesterId,
+      receiverId: connections.receiverId,
+    })
+    .from(connections)
+    .where(eq(connections.status, "accepted"));
+
+  const directIds = new Set<number>();
+  for (const connection of accepted) {
+    if (connection.requesterId === userId) directIds.add(connection.receiverId);
+    if (connection.receiverId === userId) directIds.add(connection.requesterId);
+  }
+  if (directIds.size === 0) return [];
+
+  const candidateCounts = new Map<number, Set<number>>();
+  for (const connection of accepted) {
+    const a = connection.requesterId;
+    const b = connection.receiverId;
+    if (directIds.has(a) && b !== userId && !directIds.has(b)) {
+      if (!candidateCounts.has(b)) candidateCounts.set(b, new Set());
+      candidateCounts.get(b)?.add(a);
+    }
+    if (directIds.has(b) && a !== userId && !directIds.has(a)) {
+      if (!candidateCounts.has(a)) candidateCounts.set(a, new Set());
+      candidateCounts.get(a)?.add(b);
+    }
+  }
+
+  const candidateIds = Array.from(candidateCounts.keys());
+  if (candidateIds.length === 0) return [];
+  const candidateUsers = await db
+    .select({
+      userId: users.id,
+      userName: users.name,
+      userEmail: users.email,
+      userBio: users.bio,
+      avatarUrl: users.avatarUrl,
+    })
+    .from(users)
+    .where(inArray(users.id, candidateIds));
+
+  return candidateUsers
+    .map((candidate) => ({
+      ...candidate,
+      mutualFriendCount: candidateCounts.get(candidate.userId)?.size || 0,
+    }))
+    .sort((a, b) => b.mutualFriendCount - a.mutualFriendCount);
+}
+
+export async function getRecommendationChainForTarget(targetUserId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const recommendedUser = alias(users, "recommended_user");
+  const recommenderUser = alias(users, "recommender_user");
+  return db
+    .select({
+      recommendationId: recommendations.id,
+      userId: recommendations.userId,
+      userName: recommendedUser.name,
+      userEmail: recommendedUser.email,
+      recommenderId: recommendations.recommenderId,
+      recommenderName: recommenderUser.name,
+      context: recommendations.context,
+      createdAt: recommendations.createdAt,
+    })
+    .from(recommendations)
+    .leftJoin(recommendedUser, eq(recommendations.userId, recommendedUser.id))
+    .leftJoin(recommenderUser, eq(recommendations.recommenderId, recommenderUser.id))
+    .where(eq(recommendations.targetUserId, targetUserId))
+    .orderBy(desc(recommendations.createdAt));
+}
+
+export async function getUserInfluenceScore(userId: number) {
+  const db = await getDb();
+  if (!db) {
+    return { directConnections: 0, recommendations: 0, helpProvided: 0, influenceScore: 0 };
+  }
+  const [directRows, recommendationRows, helpRows] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(connections)
+      .where(
+        and(
+          or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+          eq(connections.status, "accepted"),
+        ),
+      ),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(recommendations)
+      .where(eq(recommendations.recommenderId, userId)),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(skillMatches)
+      .where(and(eq(skillMatches.providerId, userId), eq(skillMatches.status, "completed"))),
+  ]);
+  const directConnections = Number(directRows[0]?.count || 0);
+  const recommendationCount = Number(recommendationRows[0]?.count || 0);
+  const helpProvided = Number(helpRows[0]?.count || 0);
+  return {
+    directConnections,
+    recommendations: recommendationCount,
+    helpProvided,
+    influenceScore: directConnections * 10 + recommendationCount * 20 + helpProvided * 15,
+  };
+}
+
+export async function getUserNetworkStats(userId: number) {
+  const db = await getDb();
+  if (!db) return { directConnections: 0, pendingRequests: 0, recommendations: 0 };
+  const [directRows, pendingRows, recommendationRows] = await Promise.all([
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(connections)
+      .where(
+        and(
+          or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+          eq(connections.status, "accepted"),
+        ),
+      ),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(connections)
+      .where(
+        and(
+          or(eq(connections.requesterId, userId), eq(connections.receiverId, userId)),
+          eq(connections.status, "pending"),
+        ),
+      ),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(recommendations)
+      .where(eq(recommendations.recommenderId, userId)),
+  ]);
+  return {
+    directConnections: Number(directRows[0]?.count || 0),
+    pendingRequests: Number(pendingRows[0]?.count || 0),
+    recommendations: Number(recommendationRows[0]?.count || 0),
+  };
+}
+
 export async function getPendingRequests(userId: number) {
   const db = await getDb();
   if (!db) return [];
@@ -871,6 +1205,214 @@ export async function getUserByUserId(userId: number) {
   if (!db) return undefined;
   const result = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   return result[0];
+}
+
+// ─── Astrology Matching ──────────────────────────────────────────────────────
+type AstrologyProfile = {
+  userId: number;
+  birthDate: Date;
+  sunSign: string;
+  chineseZodiac: string;
+  heavenlyStem: string;
+  earthlyBranch: string;
+};
+
+type MatchingResult = {
+  matchId: string;
+  userId1: number;
+  userId2: number;
+  userName1: string | null;
+  userName2: string | null;
+  compatibilityScore: number;
+  sunSignCompatibility: number;
+  moonSignCompatibility: number;
+  chineseZodiacCompatibility: number;
+  baziHarmony: number;
+  description: string;
+  createdAt: Date;
+};
+
+function positiveModulo(value: number, divisor: number) {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function calculateSunSign(month: number, day: number): string {
+  const signs = [
+    { name: "摩羯座", start: [12, 22], end: [1, 19] },
+    { name: "水瓶座", start: [1, 20], end: [2, 18] },
+    { name: "双鱼座", start: [2, 19], end: [3, 20] },
+    { name: "白羊座", start: [3, 21], end: [4, 19] },
+    { name: "金牛座", start: [4, 20], end: [5, 20] },
+    { name: "双子座", start: [5, 21], end: [6, 20] },
+    { name: "巨蟹座", start: [6, 21], end: [7, 22] },
+    { name: "狮子座", start: [7, 23], end: [8, 22] },
+    { name: "处女座", start: [8, 23], end: [9, 22] },
+    { name: "天秤座", start: [9, 23], end: [10, 22] },
+    { name: "天蝎座", start: [10, 23], end: [11, 21] },
+    { name: "射手座", start: [11, 22], end: [12, 21] },
+  ];
+  for (const sign of signs) {
+    const [startMonth, startDay] = sign.start;
+    const [endMonth, endDay] = sign.end;
+    if (startMonth === endMonth) {
+      if (month === startMonth && day >= startDay && day <= endDay) return sign.name;
+    } else if ((month === startMonth && day >= startDay) || (month === endMonth && day <= endDay)) {
+      return sign.name;
+    }
+  }
+  return "未知";
+}
+
+function calculateZodiac(year: number): string {
+  const animals = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+  return animals[positiveModulo(year - 1900, animals.length)];
+}
+
+function calculateBaziParts(year: number) {
+  const stems = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+  const branches = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"];
+  return {
+    heavenlyStem: stems[positiveModulo(year - 1900, stems.length)],
+    earthlyBranch: branches[positiveModulo(year - 1900, branches.length)],
+  };
+}
+
+function signCompatibility(sign1?: string, sign2?: string): number {
+  if (!sign1 || !sign2) return 50;
+  const map: Record<string, Record<string, number>> = {
+    白羊座: { 白羊座: 100, 狮子座: 95, 射手座: 90, 金牛座: 40, 巨蟹座: 35, 天秤座: 50 },
+    金牛座: { 金牛座: 100, 处女座: 95, 摩羯座: 90, 白羊座: 40, 狮子座: 35, 水瓶座: 45 },
+    双子座: { 双子座: 100, 天秤座: 95, 水瓶座: 90, 巨蟹座: 40, 处女座: 35, 双鱼座: 45 },
+    巨蟹座: { 巨蟹座: 100, 天蝎座: 95, 双鱼座: 90, 白羊座: 35, 天秤座: 40, 摩羯座: 50 },
+    狮子座: { 狮子座: 100, 射手座: 95, 白羊座: 90, 金牛座: 35, 水瓶座: 40, 天蝎座: 45 },
+    处女座: { 处女座: 100, 摩羯座: 95, 金牛座: 90, 双子座: 35, 双鱼座: 40, 射手座: 45 },
+    天秤座: { 天秤座: 100, 水瓶座: 95, 双子座: 90, 巨蟹座: 40, 摩羯座: 35, 白羊座: 50 },
+    天蝎座: { 天蝎座: 100, 双鱼座: 95, 巨蟹座: 90, 狮子座: 40, 金牛座: 35, 水瓶座: 45 },
+    射手座: { 射手座: 100, 白羊座: 95, 狮子座: 90, 处女座: 40, 双鱼座: 35, 金牛座: 50 },
+    摩羯座: { 摩羯座: 100, 金牛座: 95, 处女座: 90, 天秤座: 40, 巨蟹座: 35, 双子座: 45 },
+    水瓶座: { 水瓶座: 100, 双子座: 95, 天秤座: 90, 狮子座: 40, 天蝎座: 35, 巨蟹座: 50 },
+    双鱼座: { 双鱼座: 100, 巨蟹座: 95, 天蝎座: 90, 双子座: 40, 射手座: 35, 处女座: 45 },
+  };
+  return map[sign1]?.[sign2] || 60;
+}
+
+function harmonyScore(value1?: string, value2?: string): number {
+  if (!value1 || !value2) return 50;
+  const harmonies: Record<string, string[]> = {
+    鼠: ["龙", "猴"],
+    牛: ["蛇", "鸡"],
+    虎: ["马", "狗"],
+    兔: ["羊", "猪"],
+    龙: ["鼠", "猴"],
+    蛇: ["牛", "鸡"],
+    马: ["虎", "狗"],
+    羊: ["兔", "猪"],
+    猴: ["鼠", "龙"],
+    鸡: ["牛", "蛇"],
+    狗: ["虎", "马"],
+    猪: ["兔", "羊"],
+    子: ["辰", "申"],
+    丑: ["巳", "酉"],
+    寅: ["午", "戌"],
+    卯: ["未", "亥"],
+    辰: ["子", "申"],
+    巳: ["丑", "酉"],
+    午: ["寅", "戌"],
+    未: ["卯", "亥"],
+    申: ["子", "辰"],
+    酉: ["丑", "巳"],
+    戌: ["寅", "午"],
+    亥: ["卯", "未"],
+  };
+  if (value1 === value2) return 100;
+  return harmonies[value1]?.includes(value2) ? 88 : 50;
+}
+
+function matchingDescription(score: number): string {
+  if (score >= 85) return "天生一对！你们的星盘显示出极高的兼容性，性格和价值观都有很强的互补感。";
+  if (score >= 70) return "很有缘分！你们在多个方面都有共鸣，差异也能成为彼此吸引的部分。";
+  if (score >= 50) return "有一定基础。你们需要更多理解和包容，关系会在沟通中逐步稳定。";
+  return "需要努力。你们的节奏和表达方式差异较大，适合先从轻松相处开始。";
+}
+
+export async function getUserAstrologyProfile(userId: number): Promise<AstrologyProfile | null> {
+  const user = await getUserById(userId);
+  if (!user?.birthDate) return null;
+  const birthDate = user.birthDate;
+  const { heavenlyStem, earthlyBranch } = calculateBaziParts(birthDate.getFullYear());
+  return {
+    userId,
+    birthDate,
+    sunSign: calculateSunSign(birthDate.getMonth() + 1, birthDate.getDate()),
+    chineseZodiac: calculateZodiac(birthDate.getFullYear()),
+    heavenlyStem,
+    earthlyBranch,
+  };
+}
+
+export async function calculateCompatibility(userId1: number, userId2: number): Promise<MatchingResult | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [profile1, profile2, userRows] = await Promise.all([
+    getUserAstrologyProfile(userId1),
+    getUserAstrologyProfile(userId2),
+    db.select({ id: users.id, name: users.name }).from(users).where(inArray(users.id, [userId1, userId2])),
+  ]);
+  if (!profile1 || !profile2) return null;
+  const sunSignCompatibility = signCompatibility(profile1.sunSign, profile2.sunSign);
+  const chineseZodiacCompatibility = harmonyScore(profile1.chineseZodiac, profile2.chineseZodiac);
+  const baziHarmony = harmonyScore(profile1.earthlyBranch, profile2.earthlyBranch);
+  const compatibilityScore = Math.round(
+    sunSignCompatibility * 0.3 + chineseZodiacCompatibility * 0.4 + baziHarmony * 0.3,
+  );
+  const nameById = new Map(userRows.map((user) => [user.id, user.name]));
+  return {
+    matchId: `match_${userId1}_${userId2}_${Date.now()}`,
+    userId1,
+    userId2,
+    userName1: nameById.get(userId1) ?? null,
+    userName2: nameById.get(userId2) ?? null,
+    compatibilityScore,
+    sunSignCompatibility,
+    moonSignCompatibility: 0,
+    chineseZodiacCompatibility,
+    baziHarmony,
+    description: matchingDescription(compatibilityScore),
+    createdAt: new Date(),
+  };
+}
+
+export async function getMatchingRecommendations(userId: number, limit = 10): Promise<MatchingResult[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const currentProfile = await getUserAstrologyProfile(userId);
+  if (!currentProfile) return [];
+  const candidates = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(sql`${users.id} != ${userId}`, sql`${users.birthDate} is not null`))
+    .limit(limit * 3);
+  const matches: MatchingResult[] = [];
+  for (const candidate of candidates) {
+    const match = await calculateCompatibility(userId, candidate.id);
+    if (match) matches.push(match);
+  }
+  return matches.sort((a, b) => b.compatibilityScore - a.compatibilityScore).slice(0, limit);
+}
+
+export async function saveMatchingRecord(
+  userId1: number,
+  userId2: number,
+  compatibilityScore: number,
+  details: Record<string, unknown>,
+) {
+  return {
+    userId1,
+    userId2,
+    compatibilityScore,
+    details,
+    createdAt: new Date(),
+  };
 }
 
 export async function checkExistingConnection(requesterId: number, receiverId: number) {
@@ -1567,6 +2109,28 @@ export async function getMatchesByRequest(requestId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(skillMatches).where(eq(skillMatches.requestId, requestId));
+}
+
+export async function getMatchesForHelpRequest(requestId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      matchId: skillMatches.id,
+      providerId: skillMatches.providerId,
+      providerName: users.name,
+      providerEmail: users.email,
+      skillId: skillMatches.skillId,
+      skillName: skills.name,
+      proposedPrice: skills.priceMin,
+      status: skillMatches.status,
+      createdAt: skillMatches.createdAt,
+    })
+    .from(skillMatches)
+    .innerJoin(users, eq(skillMatches.providerId, users.id))
+    .innerJoin(skills, eq(skillMatches.skillId, skills.id))
+    .where(eq(skillMatches.requestId, requestId))
+    .orderBy(desc(skillMatches.createdAt));
 }
 
 export async function getSkillMatchById(matchId: number) {
